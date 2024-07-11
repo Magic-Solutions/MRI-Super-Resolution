@@ -1,1 +1,25 @@
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+
+# Configuration files with sensitive information
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.Python
+env/
+venv/
+
+# IDE and editor files
+.vscode/
+.idea/
+
+# OS-specific files
+.DS_Store
+
+#large data files
 data/
