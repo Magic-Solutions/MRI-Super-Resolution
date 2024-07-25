@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Load the NIfTI file
-nifti_file = '../data/Structural Preprocessed for 7T (1.6mm:59k mesh)/100610/MNINonLinear/T1w_restore.1.60.nii'
+nifti_file = '../data/HCP/Structural Preprocessed for 7T (1.6mm:59k mesh)/100610/MNINonLinear/T1w_restore.1.60.nii'
 img = nib.load(nifti_file)
 data = img.get_fdata()
 
