@@ -4,7 +4,7 @@
 This repository contains code, data, and utilities for performing super-resolution on MRI images, specifically focused on improving the resolution from 3T to 7T MRI scans. The project leverages diffusion models and other machine learning techniques.
 
 
-<img src="https://media.giphy.com/media/vFKqnCdLPNOKc/giphy.gif" width="40" height="40" />
+<img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif" width="800" height="400" />
 
 ## Table of Contents
 
