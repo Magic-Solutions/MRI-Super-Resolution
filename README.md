@@ -3,29 +3,30 @@
 
 This repository contains code, data, and utilities for performing super-resolution on MRI images, specifically focused on improving the resolution from 3T to 7T MRI scans. The project leverages diffusion models and other machine learning techniques.
 
-<div style="display: flex; align-items: center;">
-  <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_LR.gif?v=1" width="600" height="200" />
-  <div style="margin-left: 20px; text-align: left;">
-    <span style="display: block; font-size: 16px;">
-      Low resolution 1.5T MRI
-    </span>
-    <span style="display: block; font-size: 16px;">
-      3mm isotropic voxels
-    </span>
-  </div>
-</div>
-
-<div style="display: flex; align-items: center; margin-top: 10px;">
-  <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif" width="600" height="200" />
-  <div style="margin-left: 20px; text-align: left;">
-    <span style="display: block; font-size: 16px;">
-      High resolution 3T MRI
-    </span>
-    <span style="display: block; font-size: 16px;">
-      1.6mm isotropic voxels
-    </span>
-  </div>
-</div>
+<table>
+  <tr>
+    <td>
+      <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_LR.gif?v=1" width="600" height="200" />
+    </td>
+    <td style="vertical-align: middle; text-align: left; padding-left: 20px;">
+      <span style="font-size: 16px;">
+        Low resolution 1.5T MRI<br />
+        3mm isotropic voxels
+      </span>
+    </td>
+  </tr>
+  <tr>
+    <td>
+      <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif" width="600" height="200" />
+    </td>
+    <td style="vertical-align: middle; text-align: left; padding-left: 20px;">
+      <span style="font-size: 16px;">
+        High resolution 3T MRI<br />
+        1.6mm isotropic voxels
+      </span>
+    </td>
+  </tr>
+</table>
 
 ## Table of Contents
 
