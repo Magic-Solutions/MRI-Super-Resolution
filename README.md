@@ -17,7 +17,7 @@ This repository contains code, data, and utilities for performing super-resoluti
   </tr>
   <tr>
     <td>
-      <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif" width="600" height="200" />
+      <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif?v=1" width="600" height="200" />
     </td>
     <td style="vertical-align: middle; text-align: left; padding-left: 20px;">
       <span style="font-size: 16px;">
