@@ -5,7 +5,7 @@ This repository contains code, data, and utilities for performing super-resoluti
 
 1.5T MRI Scan (3mm isotropic voxels) to 3T MRI Scan (1.6mm isotropic voxels) 
 
-<img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_LR.gif" width="600" height="200" />
+<img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_LR.gif?v=1" width="600" height="200" />
 <img src="https://github.com/Magic-Solutions/MRI-Super-Resolution/blob/main/assets/mri_slice_HR.gif" width="600" height="200" />
 
 ## Table of Contents
