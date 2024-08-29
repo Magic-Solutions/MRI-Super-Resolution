@@ -1,0 +1,125 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import MultiheadAttention
+
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, groups=8):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.norm = nn.GroupNorm(groups, out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        return self.relu(self.norm(self.conv(x)))
+
+class AttentionBlock(nn.Module):
+    def __init__(self, embed_dim, num_heads):
+        super(AttentionBlock, self).__init__()
+        self.attention = MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.norm = nn.GroupNorm(1, embed_dim)
+
+    def forward(self, x):
+        b, c, d, h, w = x.shape
+        # Reshape x for multi-head attention (convert 3D to 2D)
+        x = x.view(b, c, -1).permute(0, 2, 1)  # (B, D*H*W, C)
+        attn_output, _ = self.attention(x, x, x)
+        attn_output = attn_output.permute(0, 2, 1).view(b, c, d, h, w)
+        return self.norm(attn_output + x)
+
+class DownBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(DownBlock, self).__init__()
+        self.conv1 = ConvBlock(in_channels, out_channels)
+        self.conv2 = ConvBlock(out_channels, out_channels)
+        self.pool = nn.MaxPool3d(2)
+        self.attention = AttentionBlock(out_channels, num_heads=8)
+        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        res = self.residual(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.attention(x)
+        x = x + res
+        x = self.pool(x)
+        return x
+
+class UpBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(UpBlock, self).__init__()
+        self.upconv = nn.ConvTranspose3d(in_channels, out_channels, kernel_size=2, stride=2)
+        self.conv1 = ConvBlock(in_channels, out_channels)
+        self.conv2 = ConvBlock(out_channels, out_channels)
+        self.attention = AttentionBlock(out_channels, num_heads=8)
+        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x, skip):
+        res = self.residual(x)
+        x = self.upconv(x)
+        x = torch.cat([x, skip], dim=1)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.attention(x)
+        x = x + res
+        return x
+
+class Bottleneck(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(Bottleneck, self).__init__()
+        self.conv1 = ConvBlock(in_channels, out_channels)
+        self.conv2 = ConvBlock(out_channels, out_channels)
+        self.attention = AttentionBlock(out_channels, num_heads=8)
+        self.residual = nn.Conv3d(in_channels, out_channels, kernel_size=1)
+
+    def forward(self, x):
+        res = self.residual(x)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = self.attention(x)
+        x = x + res
+        return x
+
+class UNet3D(nn.Module):
+    def __init__(self):
+        super(UNet3D, self).__init__()
+        self.down1 = DownBlock(1, 64)
+        self.down2 = DownBlock(64, 128)
+        self.down3 = DownBlock(128, 256)
+        self.down4 = DownBlock(256, 512)
+
+        self.bottleneck = Bottleneck(512, 1024)
+
+        # Gradual upsampling path
+        self.up1 = UpBlock(1024, 512)
+        self.up2 = UpBlock(512, 256)
+        self.up3 = UpBlock(256, 128)
+        self.up4 = UpBlock(128, 64)
+        self.up5 = UpBlock(64, 32)  
+        self.up6 = UpBlock(32, 16)  
+
+        self.final_conv = nn.Conv3d(16, 1, kernel_size=1)
+
+    def forward(self, x):
+        d1 = self.down1(x)
+        d2 = self.down2(d1)
+        d3 = self.down3(d2)
+        d4 = self.down4(d3)
+
+        bn = self.bottleneck(d4)
+
+        u1 = self.up1(bn, d4)
+        u2 = self.up2(u1, d3)
+        u3 = self.up3(u2, d2)
+        u4 = self.up4(u3, d1)
+        u5 = self.up5(u4, d1) 
+        u6 = self.up6(u5, d1)  
+
+        out = self.final_conv(u6)
+        return out
+
+# Instantiate the model
+model = UNet3D()
+
+# Print the model architecture
+print(model)
