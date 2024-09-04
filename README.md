@@ -1,7 +1,7 @@
 
 # MRI-Super-Resolution
 
-This repository contains code, data, and utilities for performing super-resolution on MRI images, specifically focused on improving the resolution from 3T to 7T MRI scans. The project leverages diffusion models and other machine learning techniques.
+This repository focuses on enhancing the resolution from 1.5T to 3T MRI scans. By leveraging diffusion models, low-resolution MRI scans are upgraded to high-resolution images, enabling clearer, more detailed visualizations for medical imaging.
 
 <table>
   <tr>
@@ -41,37 +41,33 @@ This repository contains code, data, and utilities for performing super-resoluti
 
 
 ## Table of Contents
-
 - [Project Structure](#project-structure)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Data](#data)
 - [Sample Data](#sample-data)
 - [Utilities](#utilities)
+- [Credits](#credits)
 - [License](#license)
 
 ## Project Structure
 
-- **assets/**: Contains auxiliary files, such as videos or images used in the project.
-  - `mri_slices_combined-ezgif.com-video-to-gif-converter.avi`: A video file likely showing combined MRI slices.
-
 - **data/**: Contains the datasets used in the project.
-  - **Brats2020/**: Dataset related to the BraTS 2020 competition, focusing on brain tumor segmentation.
-  - **HCP/**: Dataset from the Human Connectome Project (HCP), used for MRI data.
-  - **MNIST/**: Contains the MNIST dataset, possibly used for experimentation or model testing.
+  - **train/**: Contains the training data.
+    - **low_res/**: Low-resolution MRI scans.
+    - **high_res/**: High-resolution MRI scans.
 
-- **sample_data/**: Contains sample data for testing or demo purposes.
-  - **Structural Preprocessed for 7T (1.6mm/59k mesh)**: Preprocessed structural data intended for use with 7T MRI resolution.
-    - `100610_3T_Structural_1.6mm_preproc.zip`: A ZIP file containing the preprocessed data for 3T MRI.
-    - `100610_3T_Structural_1.6mm_preproc.zip.md5`: MD5 checksum for the ZIP file to verify its integrity.
+- **models/**: Contains the model definitions.
+  - `Unet_PyTorch.py`: 3D-Unet implementation in PyTorch.
+  - `Unet_JAX.py`: 3D-Unet implementation in JAX.
 
-- **utils/**: Utility scripts and notebooks for the project.
-  - `DDPM.ipynb`: A Jupyter notebook for training or experimenting with the DDPM model.
-  - `diffusion_model_mnist.pth`: A pre-trained diffusion model on the MNIST dataset.
-  - `eda_notebook.ipynb`: An exploratory data analysis (EDA) notebook.
-  - `me.jpg`: An image file, possibly a personal photo or a sample image for testing.
-  - `mri_slices_combined.avi`: Another video file, likely related to MRI data visualization.
-  - `plot_t1w.py`: A Python script for plotting T1-weighted MRI images.
+- **training/**: Contains training scripts.
+  - `train_jax.py`: Script for training the model using JAX.
+  - `train_pytorch.py`: Script for training the model using PyTorch.
+
+- **utils/**: Utility scripts and notebooks for data processing, model training, and visualization.
+  - `DDPM.ipynb`: Jupyter notebook for training or experimenting with the DDPM model.
+  - `plot_t1w.py`: Script for visualizing T1-weighted MRI images.
 
 - **venv/**: Virtual environment for managing project dependencies.
 
@@ -104,13 +100,11 @@ To set up the environment for this project:
 
 Instructions on how to run the notebooks, train models, and process the MRI data:
 
-1. **Training the Model:**
-   Open `DDPM.ipynb` in Jupyter Notebook and run the cells to start training the diffusion model.
-
-2. **Exploratory Data Analysis:**
-   Use `eda_notebook.ipynb` to explore the dataset before training.
-
-3. **Visualization:**
+1. **Training the Model with JAX:**
+   - Use `train_jax.py` to train the 3D-Unet model with JAX.
+   ```bash
+   python training/train_jax.py
+2. **Visualization:**
    Run `plot_t1w.py` to generate visualizations of T1-weighted MRI images.
 
 ## Data
@@ -126,6 +120,10 @@ Sample data under `sample_data/Structural Preprocessed for 7T` is provided to te
 ## Utilities
 
 - **Scripts and notebooks**: Utility files provided in the `utils/` directory to assist with model training, data exploration, and visualization.
+
+## Credits
+
+This project is conducted in collaboration with GENCI, who provides the computational resources. Authored by Hendrik Chiche, Ludovic Corcos, and Logan Rouge.
 
 ## License
 
