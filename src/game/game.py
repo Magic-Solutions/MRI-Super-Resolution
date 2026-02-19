@@ -40,7 +40,7 @@ class Game:
         header_height = 150 if self.verbose else 0
         header_width = 540
         font_size = 16
-        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        screen = pygame.display.set_mode((1280, 720))
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)
         clock = pygame.time.Clock()

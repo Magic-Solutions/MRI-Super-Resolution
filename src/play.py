@@ -25,6 +25,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true", help="Turn on model compilation.")
     parser.add_argument("--fps", type=int, default=15, help="Frame rate.")
     parser.add_argument("--no-header", action="store_true")
+    parser.add_argument("--local-ckpt", type=str, default=None, help="Path to local agent checkpoint.")
+    parser.add_argument("--spawn-dir", type=str, default=None, help="Path to spawn directory.")
     return parser.parse_args()
 
 
@@ -36,14 +38,15 @@ def check_args(args: argparse.Namespace) -> None:
 
 def prepare_play_mode(cfg: DictConfig, args: argparse.Namespace) -> PlayEnv:
 
-    path_hf = Path(snapshot_download(repo_id="eloialonso/diamond", allow_patterns="csgo/*"))
-
-    path_ckpt = path_hf / "csgo/model/csgo.pt"
-    spawn_dir = path_hf / "csgo/spawn"
-
-    # Override config
-    cfg.agent = OmegaConf.load(path_hf / "csgo/config/agent/csgo.yaml")
-    cfg.env = OmegaConf.load(path_hf / "csgo/config/env/csgo.yaml")
+    if args.local_ckpt:
+        path_ckpt = Path(args.local_ckpt)
+        spawn_dir = Path(args.spawn_dir) if args.spawn_dir else Path("spawn")
+    else:
+        path_hf = Path(snapshot_download(repo_id="eloialonso/diamond", allow_patterns="csgo/*"))
+        path_ckpt = path_hf / "csgo/model/csgo.pt"
+        spawn_dir = path_hf / "csgo/spawn"
+        cfg.agent = OmegaConf.load(path_hf / "csgo/config/agent/csgo.yaml")
+        cfg.env = OmegaConf.load(path_hf / "csgo/config/env/csgo.yaml")
 
     if torch.cuda.is_available():
         device = torch.device("cuda:0")
