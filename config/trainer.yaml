@@ -9,9 +9,9 @@ hydra:
     chdir: True
 
 wandb:
-  mode: disabled
-  project: null
-  entity: null
+  mode: online
+  project: diamond-depth
+  entity: omgrab
   name: null
   group: null
   tags: null

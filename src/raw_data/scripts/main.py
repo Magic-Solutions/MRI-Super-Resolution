@@ -19,6 +19,7 @@ from pathlib import Path
 import argparse
 import shutil
 
+import av
 import cv2
 import h5py
 import numpy as np
@@ -163,6 +164,7 @@ def infer_actions(hands_path: Path, n_frames: int) -> list[list[float]]:
 # ---------------------------------------------------------------------------
 
 def extract_frames(mkv_path: Path) -> list[np.ndarray]:
+    """Extract RGB frames from MKV track 0 using OpenCV."""
     cap = cv2.VideoCapture(str(mkv_path))
     if not cap.isOpened():
         raise RuntimeError(f"Cannot open {mkv_path}")
@@ -174,6 +176,52 @@ def extract_frames(mkv_path: Path) -> list[np.ndarray]:
         frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     cap.release()
     return frames
+
+
+def extract_depth_frames(mkv_path: Path) -> list[np.ndarray]:
+    """Extract 16-bit depth frames from MKV track 1 (FFV1, gray16le) using pyav.
+
+    Returns a list of uint16 grayscale arrays (H, W).
+    """
+    container = av.open(str(mkv_path))
+    stream = container.streams.video[1]
+    frames = []
+    for frame in container.decode(stream):
+        arr = frame.to_ndarray()  # (H, W) uint16 for gray16le
+        frames.append(arr)
+    container.close()
+    return frames
+
+
+def normalize_depth_to_uint8(depth_frames: list[np.ndarray]) -> list[np.ndarray]:
+    """Normalize 16-bit depth frames to 8-bit via per-clip min-max scaling."""
+    all_vals = np.concatenate([d.ravel() for d in depth_frames])
+    d_min = float(all_vals.min())
+    d_max = float(all_vals.max())
+    if d_max == d_min:
+        return [np.zeros_like(d, dtype=np.uint8) for d in depth_frames]
+    return [
+        ((d.astype(np.float32) - d_min) / (d_max - d_min) * 255).astype(np.uint8)
+        for d in depth_frames
+    ]
+
+
+def merge_rgbd(
+    rgb_frames: list[np.ndarray],
+    depth_frames: list[np.ndarray],
+) -> list[np.ndarray]:
+    """Merge RGB (H, W, 3) and depth (H_d, W_d) into RGBD (H, W, 4).
+
+    Depth is resized to match RGB dimensions before concatenation.
+    """
+    merged = []
+    for rgb, depth in zip(rgb_frames, depth_frames):
+        h, w = rgb.shape[:2]
+        if depth.shape[:2] != (h, w):
+            depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
+        rgbd = np.concatenate([rgb, depth[:, :, np.newaxis]], axis=2)
+        merged.append(rgbd)
+    return merged
 
 
 def get_episode_path(directory: Path, episode_id: int) -> Path:
@@ -311,9 +359,25 @@ def main() -> None:
         print(f"Processing: {stem}")
 
         print(f"  Extracting RGB frames from {mkv_path.name} ...")
-        frames = extract_frames(mkv_path)
-        n_frames = len(frames)
-        print(f"    {n_frames} frames, {frames[0].shape[1]}x{frames[0].shape[0]}")
+        rgb_frames = extract_frames(mkv_path)
+        n_rgb = len(rgb_frames)
+        print(f"    {n_rgb} RGB frames, {rgb_frames[0].shape[1]}x{rgb_frames[0].shape[0]}")
+
+        print(f"  Extracting depth frames from {mkv_path.name} (track 1) ...")
+        depth_frames_raw = extract_depth_frames(mkv_path)
+        n_depth = len(depth_frames_raw)
+        print(f"    {n_depth} depth frames, {depth_frames_raw[0].shape[1]}x{depth_frames_raw[0].shape[0]}")
+
+        n_frames = min(n_rgb, n_depth)
+        rgb_frames = rgb_frames[:n_frames]
+        depth_frames_raw = depth_frames_raw[:n_frames]
+
+        print(f"  Normalizing depth (16-bit -> 8-bit) ...")
+        depth_frames_u8 = normalize_depth_to_uint8(depth_frames_raw)
+
+        print(f"  Merging RGB + Depth -> RGBD ...")
+        frames = merge_rgbd(rgb_frames, depth_frames_u8)
+        print(f"    {len(frames)} RGBD frames, shape {frames[0].shape}")
 
         print(f"  Inferring actions from {hands_path.name} ...")
         actions = infer_actions(hands_path, n_frames)

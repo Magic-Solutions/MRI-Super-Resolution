@@ -8,7 +8,7 @@ denoiser:
   upsampling_factor: null
   inner_model:
     _target_: models.diffusion.InnerModelConfig
-    img_channels: 3
+    img_channels: 4
     num_steps_conditioning: 4
     cond_channels: 2048
     depths:
@@ -35,7 +35,7 @@ upsampler:
   upsampling_factor: 5
   inner_model:
     _target_: models.diffusion.InnerModelConfig
-    img_channels: 3
+    img_channels: 4
     num_steps_conditioning: 1
     cond_channels: 2048
     depths:

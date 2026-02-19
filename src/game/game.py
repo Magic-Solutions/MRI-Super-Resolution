@@ -60,22 +60,40 @@ class Game:
             assert (0 <= x_pos <= header_width) and (0 <= y_pos <= header_height)
             screen.blit(font.render(text, True, pygame.Color("white")), (x_header + x_pos, y_header + y_pos))
 
+        has_depth = True  # RGBD model outputs 4 channels
+        gap = 10  # pixel gap between RGB and depth panels
+
         def draw_obs(obs, obs_low_res=None):
             assert obs.ndim == 4 and obs.size(0) == 1
-            img = Image.fromarray(obs[0].add(1).div(2).mul(255).byte().permute(1, 2, 0).cpu().numpy())
+            rgb = obs[0, :3]
+            rgb_np = rgb.add(1).div(2).mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+            img = Image.fromarray(rgb_np)
             pygame_image = np.array(img.resize((self.width, self.height), resample=Image.BICUBIC)).transpose((1, 0, 2))
             surface = pygame.surfarray.make_surface(pygame_image)
-            screen.blit(surface, (x_center - self.width // 2, y_center - self.height // 2))
+
+            if has_depth and obs.size(1) >= 4:
+                x_rgb = x_center - self.width - gap // 2
+                screen.blit(surface, (x_rgb, y_center - self.height // 2))
+
+                depth = obs[0, 3:4].expand(3, -1, -1)
+                depth_np = depth.add(1).div(2).mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
+                depth_img = Image.fromarray(depth_np)
+                depth_pygame = np.array(depth_img.resize((self.width, self.height), resample=Image.BICUBIC)).transpose((1, 0, 2))
+                depth_surface = pygame.surfarray.make_surface(depth_pygame)
+                x_depth = x_center + gap // 2
+                screen.blit(depth_surface, (x_depth, y_center - self.height // 2))
+            else:
+                screen.blit(surface, (x_center - self.width // 2, y_center - self.height // 2))
 
             if obs_low_res is not None:
                 assert obs_low_res.ndim == 4 and obs_low_res.size(0) == 1
-                img = Image.fromarray(obs_low_res[0].add(1).div(2).mul(255).byte().permute(1, 2, 0).cpu().numpy())
+                rgb_lr = obs_low_res[0, :3]
+                img = Image.fromarray(rgb_lr.add(1).div(2).mul(255).byte().permute(1, 2, 0).cpu().numpy())
                 h = self.height * obs_low_res.size(2) // obs.size(2)
                 w = self.width * obs_low_res.size(3) // obs.size(3)
                 pygame_image = np.array(img.resize((w, h), resample=Image.BICUBIC)).transpose((1, 0, 2))
                 surface = pygame.surfarray.make_surface(pygame_image)
                 screen.blit(surface, (x_header + header_width - w - 5, y_header + 5 + font_size))
-                # screen.blit(surface, (x_center - w // 2, y_center + self.height // 2))
 
         def reset():
             nonlocal obs, info, do_reset, ep_return, ep_length, keys_pressed, l_click, r_click

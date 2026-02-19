@@ -181,7 +181,7 @@ class CSGOHdf5Dataset(StateDictMixin, TorchDataset):
         mask_padding = torch.cat((torch.zeros(pad_len_left), torch.ones(stop - start), torch.zeros(pad_len_right))).bool()
 
         with h5py.File(self._filenames[segment_id.episode_id], "r") as f:
-            obs = torch.stack([torch.tensor(f[f"frame_{i}_x"][:]).flip(2).permute(2, 0, 1).div(255).mul(2).sub(1) for i in range(start, stop)])
+            obs = torch.stack([torch.tensor(f[f"frame_{i}_x"][:]).permute(2, 0, 1).div(255).mul(2).sub(1) for i in range(start, stop)])
             act = torch.tensor(np.array([f[f"frame_{i}_y"][:] for i in range(start, stop)]))
 
         def pad(x):
