@@ -38,7 +38,7 @@ class Episode:
         return cls(
             **{
                 k: v.div(255).mul(2).sub(1) if k == "obs" else v
-                for k, v in torch.load(Path(path), map_location=map_location).items()
+                for k, v in torch.load(Path(path), map_location=map_location, weights_only=False).items()
             }
         )
 

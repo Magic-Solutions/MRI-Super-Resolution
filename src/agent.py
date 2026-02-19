@@ -63,7 +63,7 @@ class Agent(nn.Module):
         load_rew_end_model: bool = True,
         load_actor_critic: bool = True,
     ) -> None:
-        sd = torch.load(Path(path_to_ckpt), map_location=self.device)
+        sd = torch.load(Path(path_to_ckpt), map_location=self.device, weights_only=False)
         if load_denoiser:
             self.denoiser.load_state_dict(extract_state_dict(sd, "denoiser"))
         if load_upsampler:

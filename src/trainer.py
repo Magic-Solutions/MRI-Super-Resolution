@@ -447,7 +447,7 @@ class Trainer(StateDictMixin):
         return to_log
 
     def load_state_checkpoint(self) -> None:
-        self.load_state_dict(torch.load(self._path_state_ckpt, map_location=self._device))
+        self.load_state_dict(torch.load(self._path_state_ckpt, map_location=self._device, weights_only=False))
 
     def save_checkpoint(self) -> None:
         if self._rank == 0:
