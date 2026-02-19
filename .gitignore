@@ -16,4 +16,8 @@ __pycache__/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
+*.DS_Store
+*.hdf5
+*.mkv
+*.ndjson
+*.pt
