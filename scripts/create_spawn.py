@@ -1,11 +1,11 @@
 """Create spawn data from HDF5 training episodes for interactive inference.
 
 Usage:
-    python spawn/create_spawn.py --hdf5-dir src/processed_data_omgrab/full_res/omgrab --num-conditioning 4
+    python scripts/create_spawn.py --hdf5-dir src/processed_data_omgrab/full_res/train
 
 This generates one spawn directory per HDF5 file, each containing:
-    low_res.npy   (num_conditioning, 3, 30, 56) uint8
-    full_res.npy  (num_conditioning, 3, 150, 280) uint8
+    low_res.npy   (num_conditioning, 4, 30, 56) uint8
+    full_res.npy  (num_conditioning, 4, 150, 280) uint8
     act.npy       (num_conditioning, 51) float
     next_act.npy  (1, 51) float
 """
@@ -37,7 +37,7 @@ def create_spawn_from_hdf5(
         acts = []
 
         for i in range(start_frame, start_frame + num_conditioning):
-            frame = torch.tensor(f[f"frame_{i}_x"][:]).flip(2).permute(2, 0, 1)
+            frame = torch.tensor(f[f"frame_{i}_x"][:]).permute(2, 0, 1)
             full_res_frames.append(frame)
 
             img = Image.fromarray(frame.permute(1, 2, 0).numpy())

@@ -15,7 +15,7 @@ from csgo.action_processing import encode_csgo_action, CSGOAction
 
 OmegaConf.register_new_resolver("eval", eval)
 
-CKPT = "outputs/2026-02-19/21-05-59/checkpoints/agent_versions/agent_epoch_00002.pt"
+CKPT = "outputs/2026-02-20/05-07-30/checkpoints/agent_versions/agent_epoch_00005.pt"
 SPAWN_DIR = "spawn"
 OUT_DIR = Path("inference_frames")
 NUM_STEPS = 20

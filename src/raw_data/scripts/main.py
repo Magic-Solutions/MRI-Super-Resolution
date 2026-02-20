@@ -14,6 +14,7 @@ Usage:
     python main.py <out_dir> [--chunk-size 1000]
 """
 
+import gc
 import json
 import random
 import subprocess
@@ -274,6 +275,82 @@ def merge_rgbd(
     return merged
 
 
+def iter_rgb_frames(mkv_path: Path):
+    """Yield RGB frames one at a time from MKV track 0 using OpenCV."""
+    cap = cv2.VideoCapture(str(mkv_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open {mkv_path}")
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            yield cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    finally:
+        cap.release()
+
+
+def iter_depth_frames(mkv_path: Path):
+    """Yield 16-bit depth frames one at a time from MKV track 1 via ffmpeg pipe."""
+    probe = av.open(str(mkv_path))
+    stream = probe.streams.video[1]
+    w, h = stream.width, stream.height
+    probe.close()
+
+    frame_bytes = w * h * 2
+    proc = subprocess.Popen(
+        [
+            "ffmpeg", "-i", str(mkv_path),
+            "-map", "0:v:1",
+            "-f", "rawvideo", "-pix_fmt", "gray16le",
+            "-v", "error",
+            "pipe:1",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        while True:
+            raw = proc.stdout.read(frame_bytes)
+            if len(raw) < frame_bytes:
+                break
+            arr = np.frombuffer(raw, dtype=np.uint16).reshape(h, w).copy()
+            yield arr
+    finally:
+        proc.stdout.close()
+        proc.terminate()
+        proc.wait()
+
+
+def normalize_depth_frame(
+    d: np.ndarray,
+    lo_pct: float = 3.0,
+    hi_pct: float = 97.0,
+) -> np.ndarray:
+    """Normalize a single 16-bit depth frame to 8-bit with percentile clipping."""
+    result = np.zeros(d.shape, dtype=np.uint8)
+    mask = d > 0
+    if not mask.any():
+        return result
+    vals = d[mask].astype(np.float32)
+    p_lo = np.percentile(vals, lo_pct)
+    p_hi = np.percentile(vals, hi_pct)
+    if p_hi <= p_lo:
+        return result
+    clipped = np.clip(d.astype(np.float32), p_lo, p_hi)
+    normed = (clipped - p_lo) / (p_hi - p_lo)
+    result[mask] = (normed[mask] * 254 + 1).astype(np.uint8)
+    return result
+
+
+def merge_rgbd_frame(rgb: np.ndarray, depth: np.ndarray) -> np.ndarray:
+    """Merge one RGB (H, W, 3) + depth (H_d, W_d) frame into RGBD (H, W, 4)."""
+    h, w = rgb.shape[:2]
+    if depth.shape[:2] != (h, w):
+        depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.concatenate([rgb, depth[:, :, np.newaxis]], axis=2)
+
+
 def get_episode_path(directory: Path, episode_id: int) -> Path:
     n = 3
     powers = np.arange(n)
@@ -410,19 +487,19 @@ def process_split(
     out_dir: Path,
     chunk_size: int,
 ) -> None:
-    """Process a single split (train or test)."""
+    """Process a single split (train or test).
+
+    Streams RGB + depth frames and processes them in chunk-sized batches
+    so that only ~chunk_size frames are in memory at a time.
+    """
     split_raw = raw_dir / split
     if not split_raw.is_dir():
         print(f"\n  Skipping '{split}': {split_raw} does not exist")
         return
 
-    full_res_dir = out_dir / "full_res"
+    full_res_dir = out_dir / "full_res" / split
     split_dir = out_dir / "low_res" / split
     info_path = split_dir / "info.pt"
-
-    if split_dir.exists():
-        print(f"  Clearing existing {split_dir} ...")
-        shutil.rmtree(split_dir)
 
     print(f"\nScanning {split_raw} for MKV files ...")
     mkvs = find_mkvs(split_raw)
@@ -438,77 +515,109 @@ def process_split(
         print(f"{'='*60}")
         print(f"Processing: {stem}")
 
-        print(f"  Extracting RGB frames from {mkv_path.name} ...")
-        rgb_frames = extract_frames(mkv_path)
-        n_rgb = len(rgb_frames)
-        print(f"    {n_rgb} RGB frames, {rgb_frames[0].shape[1]}x{rgb_frames[0].shape[0]}")
-
-        print(f"  Extracting depth frames from {mkv_path.name} (track 1) ...")
-        depth_frames_raw = extract_depth_frames(mkv_path)
-        n_depth = len(depth_frames_raw)
-        print(f"    {n_depth} depth frames, {depth_frames_raw[0].shape[1]}x{depth_frames_raw[0].shape[0]}")
-
-        n_frames = min(n_rgb, n_depth)
-        rgb_frames = rgb_frames[:n_frames]
-        depth_frames_raw = depth_frames_raw[:n_frames]
-
-        print(f"  Normalizing depth (16-bit -> 8-bit) ...")
-        depth_frames_u8 = normalize_depth_to_uint8(depth_frames_raw)
-
-        print(f"  Merging RGB + Depth -> RGBD ...")
-        frames = merge_rgbd(rgb_frames, depth_frames_u8)
-        print(f"    {len(frames)} RGBD frames, shape {frames[0].shape}")
-
         print(f"  Extracting hand landmarks from {mkv_path.name} (track 3) ...")
         hands_by_frame = extract_hand_landmarks(mkv_path)
         print(f"    {len(hands_by_frame)} hand landmark packets")
 
-        print(f"  Inferring actions ...")
-        actions = infer_actions(hands_by_frame, n_frames)
-        print(f"    {len(actions)} actions inferred")
+        print(f"  Streaming RGB + depth in chunks of {chunk_size} ...")
+        action_state = ActionState()
+        chunk_rgbd: list[np.ndarray] = []
+        chunk_actions: list[list[float]] = []
+        sample_rgb: np.ndarray | None = None
+        sample_depth_u8: np.ndarray | None = None
+        sample_action: list[float] | None = None
+        frame_idx = 0
+        chunk_count = 0
+        sample_saved = False
+        sample_local_idx = random.randint(0, chunk_size - 1)
 
-        sample_idx = random.randint(0, n_frames - 1)
-        sample_dir = out_dir / "samples"
-        save_sample_frame(sample_dir, stem, sample_idx, rgb_frames, depth_frames_u8, actions)
-        print(f"  Saved sample frame {sample_idx} to {sample_dir}")
+        rgb_gen = iter_rgb_frames(mkv_path)
+        depth_gen = iter_depth_frames(mkv_path)
+        try:
+            for rgb, depth_raw in zip(rgb_gen, depth_gen):
+                depth_u8 = normalize_depth_frame(depth_raw)
+                rgbd = merge_rgbd_frame(rgb, depth_u8)
 
-        n_full_chunks = n_frames // chunk_size
-        tail = n_frames - n_full_chunks * chunk_size
+                hands = hands_by_frame.get(frame_idx, [])
+                right = get_right_hand(hands)
+                update_actions(action_state, right["landmarks"] if right else None)
+                action = encode_action(action_state)
 
-        if n_full_chunks == 0:
-            print(f"  SKIP: clip too short ({n_frames}f < {chunk_size})")
-            continue
+                chunk_rgbd.append(rgbd)
+                chunk_actions.append(action)
 
-        if tail > 0:
-            print(f"  {n_full_chunks} full chunk(s), discarding {tail} leftover frames")
+                local_idx = len(chunk_rgbd) - 1
+                if not sample_saved and local_idx == sample_local_idx:
+                    sample_rgb = rgb
+                    sample_depth_u8 = depth_u8
+                    sample_action = action
+
+                frame_idx += 1
+
+                if len(chunk_rgbd) == chunk_size:
+                    if not sample_saved and sample_rgb is not None:
+                        sample_dir = out_dir / "samples"
+                        sample_dir.mkdir(parents=True, exist_ok=True)
+                        global_idx = chunk_count * chunk_size + sample_local_idx
+                        prefix = f"{stem}_f{global_idx}"
+                        rgb_lo = cv2.resize(sample_rgb, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
+                        rgb_hi = cv2.resize(sample_rgb, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
+                        d_lo = cv2.resize(sample_depth_u8, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
+                        d_hi = cv2.resize(sample_depth_u8, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
+                        cv2.imwrite(str(sample_dir / f"{prefix}_rgb_lo.png"), cv2.cvtColor(rgb_lo, cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(str(sample_dir / f"{prefix}_rgb_hi.png"), cv2.cvtColor(rgb_hi, cv2.COLOR_RGB2BGR))
+                        cv2.imwrite(str(sample_dir / f"{prefix}_depth_lo.png"), d_lo)
+                        cv2.imwrite(str(sample_dir / f"{prefix}_depth_hi.png"), d_hi)
+                        with open(sample_dir / f"{prefix}_action.json", "w") as f:
+                            json.dump({"frame": global_idx, "action": sample_action}, f, indent=2)
+                        print(f"  Saved sample frame {global_idx} to {sample_dir}")
+                        sample_saved = True
+                        del sample_rgb, sample_depth_u8, sample_action
+
+                    episode_id = info["num_episodes"]
+                    hdf5_name = f"{stem}_chunk{chunk_count}.hdf5"
+                    hdf5_path = full_res_dir / hdf5_name
+                    file_id = f"{split}/{hdf5_name}"
+                    save_full_res_hdf5(hdf5_path, chunk_rgbd, chunk_actions, 0, chunk_size)
+                    save_low_res_episode(
+                        split_dir, episode_id, chunk_rgbd, chunk_actions,
+                        0, chunk_size, file_id,
+                    )
+
+                    info["start_idx"] = np.concatenate((info["start_idx"], np.array([info["num_steps"]])))
+                    info["lengths"] = np.concatenate((info["lengths"], np.array([chunk_size])))
+                    info["num_steps"] += chunk_size
+                    info["num_episodes"] += 1
+                    info["counter_rew"].update(Counter({0.0: chunk_size}))
+                    info["counter_end"].update(Counter({0: chunk_size}))
+
+                    ep_path = get_episode_path(split_dir, episode_id)
+                    print(f"    chunk {chunk_count}: frames "
+                          f"[{chunk_count * chunk_size}:{(chunk_count + 1) * chunk_size}] "
+                          f"-> episode {episode_id} ({ep_path.name})")
+
+                    chunk_rgbd.clear()
+                    chunk_actions.clear()
+                    chunk_count += 1
+                    gc.collect()
+        finally:
+            rgb_gen.close()
+            depth_gen.close()
+
+        tail = len(chunk_rgbd)
+        total_frames = frame_idx
+        if chunk_count == 0:
+            print(f"  SKIP: clip too short ({total_frames}f < {chunk_size})")
+        elif tail > 0:
+            print(f"  {chunk_count} full chunk(s), discarding {tail} leftover frames")
         else:
-            print(f"  {n_full_chunks} full chunk(s)")
+            print(f"  {chunk_count} full chunk(s)")
+        print(f"  {total_frames} frames streamed")
 
-        for chunk_idx in range(n_full_chunks):
-            start = chunk_idx * chunk_size
-            end = start + chunk_size
-            episode_id = info["num_episodes"]
-
-            hdf5_subdir = "omgrab"
-            hdf5_name = f"omgrab_{episode_id}.hdf5"
-            hdf5_path = full_res_dir / hdf5_subdir / hdf5_name
-            file_id = f"{hdf5_subdir}/{hdf5_name}"
-            save_full_res_hdf5(hdf5_path, frames, actions, start, end)
-
-            save_low_res_episode(
-                split_dir, episode_id, frames, actions, start, end, file_id,
-            )
-
-            info["start_idx"] = np.concatenate((info["start_idx"], np.array([info["num_steps"]])))
-            info["lengths"] = np.concatenate((info["lengths"], np.array([chunk_size])))
-            info["num_steps"] += chunk_size
-            info["num_episodes"] += 1
-            info["counter_rew"].update(Counter({0.0: chunk_size}))
-            info["counter_end"].update(Counter({0: chunk_size}))
-
-            ep_path = get_episode_path(split_dir, episode_id)
-            print(f"    chunk {chunk_idx}: frames [{start}:{end}] -> episode "
-                  f"{episode_id} ({ep_path.name})")
+        del hands_by_frame
+        chunk_rgbd.clear()
+        chunk_actions.clear()
+        gc.collect()
 
     save_info(info_path, info)
 
@@ -517,11 +626,10 @@ def process_split(
 
 def main() -> None:
     args = parse_args()
-    full_res_dir = args.out_dir / "full_res"
 
-    if full_res_dir.exists():
-        print(f"Clearing existing {full_res_dir} ...")
-        shutil.rmtree(full_res_dir)
+    if args.out_dir.exists():
+        print(f"Clearing existing {args.out_dir} ...")
+        shutil.rmtree(args.out_dir)
 
     for split in ("train", "test"):
         print(f"\n{'#'*60}")
@@ -531,13 +639,15 @@ def main() -> None:
 
     print(f"\n{'='*60}")
     print(f"Dataset written to {args.out_dir}")
-    print(f"  full_res: {full_res_dir}")
     for split in ("train", "test"):
+        full_res_split = args.out_dir / "full_res" / split
         split_dir = args.out_dir / "low_res" / split
         info_path = split_dir / "info.pt"
         if info_path.exists():
             info = torch.load(info_path, weights_only=False)
             print(f"  {split}: {info['num_episodes']} episodes, {info['num_steps']} steps")
+            print(f"    full_res: {full_res_split}")
+            print(f"    low_res:  {split_dir}")
         else:
             print(f"  {split}: (empty)")
 
