@@ -1,15 +1,15 @@
 """Batch-process all MKV + hand-landmark pairs into DIAMOND training data.
 
-Scans the raw_data/ parent folder for file pairs:
+Scans raw_data/train/ and raw_data/test/ for file pairs:
     <uuid>.mkv + <uuid>_hands.ndjson
 
-For each pair:
+For each split:
   1. Infers actions from hand landmarks (headless, no GUI)
   2. Converts to DIAMOND processed_data format (full_res HDF5 + low_res .pt)
   3. Splits clips longer than CHUNK_SIZE frames into multiple episodes
 
 Usage:
-    python main.py <out_dir> [--split train] [--chunk-size 1000]
+    python main.py <out_dir> [--chunk-size 1000]
 """
 
 import json
@@ -193,17 +193,35 @@ def extract_depth_frames(mkv_path: Path) -> list[np.ndarray]:
     return frames
 
 
-def normalize_depth_to_uint8(depth_frames: list[np.ndarray]) -> list[np.ndarray]:
-    """Normalize 16-bit depth frames to 8-bit via per-clip min-max scaling."""
-    all_vals = np.concatenate([d.ravel() for d in depth_frames])
-    d_min = float(all_vals.min())
-    d_max = float(all_vals.max())
-    if d_max == d_min:
-        return [np.zeros_like(d, dtype=np.uint8) for d in depth_frames]
-    return [
-        ((d.astype(np.float32) - d_min) / (d_max - d_min) * 255).astype(np.uint8)
-        for d in depth_frames
-    ]
+def normalize_depth_to_uint8(
+    depth_frames: list[np.ndarray],
+    lo_pct: float = 3.0,
+    hi_pct: float = 97.0,
+) -> list[np.ndarray]:
+    """Normalize 16-bit depth frames to 8-bit per-frame with percentile clipping.
+
+    Zeros (invalid/no-return pixels) are kept as zero.  Non-zero values are
+    clipped to [lo_pct, hi_pct] percentiles of the non-zero pixels in each
+    frame, then linearly mapped to [1, 255].
+    """
+    out = []
+    for d in depth_frames:
+        result = np.zeros(d.shape, dtype=np.uint8)
+        mask = d > 0
+        if not mask.any():
+            out.append(result)
+            continue
+        vals = d[mask].astype(np.float32)
+        p_lo = np.percentile(vals, lo_pct)
+        p_hi = np.percentile(vals, hi_pct)
+        if p_hi <= p_lo:
+            out.append(result)
+            continue
+        clipped = np.clip(d.astype(np.float32), p_lo, p_hi)
+        normed = (clipped - p_lo) / (p_hi - p_lo)
+        result[mask] = (normed[mask] * 254 + 1).astype(np.uint8)
+        out.append(result)
+    return out
 
 
 def merge_rgbd(
@@ -324,30 +342,35 @@ def find_pairs(raw_dir: Path) -> list[tuple[Path, Path]]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out_dir", type=Path, help="Root output directory (e.g. src/processed_data_omgrab)")
-    parser.add_argument("--split", default="train", choices=["train", "test"])
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
                         help=f"Max frames per episode (default: {CHUNK_SIZE})")
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
-    chunk_size = args.chunk_size
-    full_res_dir = args.out_dir / "full_res"
-    split_dir = args.out_dir / "low_res" / args.split
+def process_split(
+    split: str,
+    raw_dir: Path,
+    out_dir: Path,
+    chunk_size: int,
+) -> None:
+    """Process a single split (train or test)."""
+    split_raw = raw_dir / split
+    if not split_raw.is_dir():
+        print(f"\n  Skipping '{split}': {split_raw} does not exist")
+        return
+
+    full_res_dir = out_dir / "full_res"
+    split_dir = out_dir / "low_res" / split
     info_path = split_dir / "info.pt"
 
-    if full_res_dir.exists():
-        print(f"Clearing existing {full_res_dir} ...")
-        shutil.rmtree(full_res_dir)
     if split_dir.exists():
-        print(f"Clearing existing {split_dir} ...")
+        print(f"  Clearing existing {split_dir} ...")
         shutil.rmtree(split_dir)
 
-    print(f"Scanning {RAW_DIR} for MKV + hands.ndjson pairs ...")
-    pairs = find_pairs(RAW_DIR)
+    print(f"\nScanning {split_raw} for MKV + hands.ndjson pairs ...")
+    pairs = find_pairs(split_raw)
     if not pairs:
-        print("No file pairs found.")
+        print("  No file pairs found.")
         return
     print(f"  Found {len(pairs)} pair(s)\n")
 
@@ -423,13 +446,34 @@ def main() -> None:
 
     save_info(info_path, info)
 
+    print(f"\n  {split} done: {info['num_episodes']} episodes, {info['num_steps']} steps")
+
+
+def main() -> None:
+    args = parse_args()
+    full_res_dir = args.out_dir / "full_res"
+
+    if full_res_dir.exists():
+        print(f"Clearing existing {full_res_dir} ...")
+        shutil.rmtree(full_res_dir)
+
+    for split in ("train", "test"):
+        print(f"\n{'#'*60}")
+        print(f"# Split: {split}")
+        print(f"{'#'*60}")
+        process_split(split, RAW_DIR, args.out_dir, args.chunk_size)
+
     print(f"\n{'='*60}")
     print(f"Dataset written to {args.out_dir}")
     print(f"  full_res: {full_res_dir}")
-    print(f"  low_res:  {split_dir}")
-    print(f"  Episodes: {info['num_episodes']}")
-    print(f"  Steps:    {info['num_steps']}")
-    print(f"  Lengths:  {info['lengths'].tolist()}")
+    for split in ("train", "test"):
+        split_dir = args.out_dir / "low_res" / split
+        info_path = split_dir / "info.pt"
+        if info_path.exists():
+            info = torch.load(info_path, weights_only=False)
+            print(f"  {split}: {info['num_episodes']} episodes, {info['num_steps']} steps")
+        else:
+            print(f"  {split}: (empty)")
 
 
 if __name__ == "__main__":
