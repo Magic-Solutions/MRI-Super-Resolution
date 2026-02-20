@@ -228,32 +228,22 @@ def extract_depth_frames(mkv_path: Path) -> list[np.ndarray]:
 
 def normalize_depth_to_uint8(
     depth_frames: list[np.ndarray],
+    depth_bounds: tuple[float, float] | None = None,
     lo_pct: float = 3.0,
     hi_pct: float = 97.0,
 ) -> list[np.ndarray]:
-    """Normalize 16-bit depth frames to 8-bit per-frame with percentile clipping.
+    """Normalize 16-bit depth frames to 8-bit.
+
+    If depth_bounds is provided, uses those fixed (p_lo, p_hi) values for
+    all frames so that the same physical depth always maps to the same
+    pixel value.  Otherwise falls back to per-frame percentile clipping.
 
     Zeros (invalid/no-return pixels) are kept as zero.  Non-zero values are
-    clipped to [lo_pct, hi_pct] percentiles of the non-zero pixels in each
-    frame, then linearly mapped to [1, 255].
+    clipped to [lo, hi] then linearly mapped to [1, 255].
     """
     out = []
     for d in depth_frames:
-        result = np.zeros(d.shape, dtype=np.uint8)
-        mask = d > 0
-        if not mask.any():
-            out.append(result)
-            continue
-        vals = d[mask].astype(np.float32)
-        p_lo = np.percentile(vals, lo_pct)
-        p_hi = np.percentile(vals, hi_pct)
-        if p_hi <= p_lo:
-            out.append(result)
-            continue
-        clipped = np.clip(d.astype(np.float32), p_lo, p_hi)
-        normed = (clipped - p_lo) / (p_hi - p_lo)
-        result[mask] = (normed[mask] * 254 + 1).astype(np.uint8)
-        out.append(result)
+        out.append(normalize_depth_frame(d, depth_bounds, lo_pct, hi_pct))
     return out
 
 
@@ -322,19 +312,56 @@ def iter_depth_frames(mkv_path: Path):
         proc.wait()
 
 
+def compute_global_depth_bounds(
+    mkvs: list[Path],
+    lo_pct: float = 3.0,
+    hi_pct: float = 97.0,
+    sample_every: int = 10,
+) -> tuple[float, float]:
+    """Compute global depth percentile bounds across all MKV files.
+
+    Samples every Nth depth frame to keep memory and time reasonable.
+    Returns (p_lo, p_hi) in uint16 depth units.
+    """
+    all_vals: list[np.ndarray] = []
+    for mkv_path in mkvs:
+        print(f"    Scanning depth: {mkv_path.name} ...")
+        for i, d in enumerate(iter_depth_frames(mkv_path)):
+            if i % sample_every != 0:
+                continue
+            mask = d > 0
+            if mask.any():
+                vals = d[mask].ravel()
+                stride = max(1, len(vals) // 2000)
+                all_vals.append(vals[::stride])
+    combined = np.concatenate(all_vals)
+    p_lo = float(np.percentile(combined, lo_pct))
+    p_hi = float(np.percentile(combined, hi_pct))
+    print(f"    Global depth bounds: [{p_lo:.0f}, {p_hi:.0f}] (uint16)")
+    return p_lo, p_hi
+
+
 def normalize_depth_frame(
     d: np.ndarray,
+    depth_bounds: tuple[float, float] | None = None,
     lo_pct: float = 3.0,
     hi_pct: float = 97.0,
 ) -> np.ndarray:
-    """Normalize a single 16-bit depth frame to 8-bit with percentile clipping."""
+    """Normalize a single 16-bit depth frame to 8-bit.
+
+    If depth_bounds is provided, uses those fixed (p_lo, p_hi) values.
+    Otherwise falls back to per-frame percentile clipping.
+    """
     result = np.zeros(d.shape, dtype=np.uint8)
     mask = d > 0
     if not mask.any():
         return result
-    vals = d[mask].astype(np.float32)
-    p_lo = np.percentile(vals, lo_pct)
-    p_hi = np.percentile(vals, hi_pct)
+    if depth_bounds is not None:
+        p_lo, p_hi = depth_bounds
+    else:
+        vals = d[mask].astype(np.float32)
+        p_lo = np.percentile(vals, lo_pct)
+        p_hi = np.percentile(vals, hi_pct)
     if p_hi <= p_lo:
         return result
     clipped = np.clip(d.astype(np.float32), p_lo, p_hi)
@@ -506,7 +533,11 @@ def process_split(
     if not mkvs:
         print("  No MKV files found.")
         return
-    print(f"  Found {len(mkvs)} file(s)\n")
+    print(f"  Found {len(mkvs)} file(s)")
+
+    print(f"\n  Computing global depth bounds ...")
+    depth_bounds = compute_global_depth_bounds(mkvs)
+    print()
 
     info = load_info(info_path)
 
@@ -535,7 +566,7 @@ def process_split(
         depth_gen = iter_depth_frames(mkv_path)
         try:
             for rgb, depth_raw in zip(rgb_gen, depth_gen):
-                depth_u8 = normalize_depth_frame(depth_raw)
+                depth_u8 = normalize_depth_frame(depth_raw, depth_bounds)
                 rgbd = merge_rgbd_frame(rgb, depth_u8)
 
                 hands = hands_by_frame.get(frame_idx, [])
