@@ -11,3 +11,5 @@ torch==2.4.1
 torcheval==0.0.7
 tqdm==4.66.4
 wandb==0.17.0
+av
+torchvision==0.19.1
