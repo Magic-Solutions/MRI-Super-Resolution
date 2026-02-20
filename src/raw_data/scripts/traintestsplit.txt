@@ -4,4 +4,4 @@
 # Files are saved as <folder>_<filename> in src/raw_data/<split>/
 train om002/cookie_openhand.mkv
 train om002/cookie_dragdropcookies.mkv
-test om002/cookie_dragdropcookies_2.mkv
+train om002/cookie_dragdropcookies_2.mkv
