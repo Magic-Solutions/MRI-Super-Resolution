@@ -1,10 +1,12 @@
-"""Batch-process all MKV + hand-landmark pairs into DIAMOND training data.
+"""Batch-process MKV files into DIAMOND training data.
 
-Scans raw_data/train/ and raw_data/test/ for file pairs:
-    <uuid>.mkv + <uuid>_hands.ndjson
+Scans raw_data/train/ and raw_data/test/ for .mkv files containing:
+    - Track 0: RGB video (H.264)
+    - Track 1: Depth video (FFV1, gray16le)
+    - Track 3: Hand landmarks (SRT subtitle, JSON per packet)
 
 For each split:
-  1. Infers actions from hand landmarks (headless, no GUI)
+  1. Extracts hand landmarks from subtitle stream and infers actions
   2. Converts to DIAMOND processed_data format (full_res HDF5 + low_res .pt)
   3. Splits clips longer than CHUNK_SIZE frames into multiple episodes
 
@@ -13,6 +15,8 @@ Usage:
 """
 
 import json
+import random
+import subprocess
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,17 +142,26 @@ def encode_action(state: ActionState) -> list[float]:
     return vec
 
 
-def infer_actions(hands_path: Path, n_frames: int) -> list[list[float]]:
-    """Run action inference headlessly over all frames."""
-    hands_by_frame: dict[int, list] = {}
-    with open(hands_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            hands_by_frame[entry["f"]] = entry["h"]
+def extract_hand_landmarks(mkv_path: Path) -> dict[int, list]:
+    """Extract hand landmark data from subtitle stream 3 of the MKV.
 
+    Returns a dict mapping frame number -> list of hand entries,
+    matching the format previously stored in _hands.ndjson files.
+    """
+    container = av.open(str(mkv_path))
+    stream = container.streams[3]
+    hands_by_frame: dict[int, list] = {}
+    for pkt in container.demux(stream):
+        if pkt.size == 0:
+            continue
+        entry = json.loads(bytes(pkt).decode("utf-8").strip())
+        hands_by_frame[entry["f"]] = entry["h"]
+    container.close()
+    return hands_by_frame
+
+
+def infer_actions(hands_by_frame: dict[int, list], n_frames: int) -> list[list[float]]:
+    """Run action inference headlessly over all frames."""
     state = ActionState()
     actions: list[list[float]] = []
     for i in range(n_frames):
@@ -179,17 +192,36 @@ def extract_frames(mkv_path: Path) -> list[np.ndarray]:
 
 
 def extract_depth_frames(mkv_path: Path) -> list[np.ndarray]:
-    """Extract 16-bit depth frames from MKV track 1 (FFV1, gray16le) using pyav.
+    """Extract 16-bit depth frames from MKV track 1 (FFV1, gray16le) via ffmpeg.
+
+    Uses ffmpeg subprocess because pyav's FFV1 decoder chokes on keyframe
+    parameter changes that ffmpeg handles gracefully.
 
     Returns a list of uint16 grayscale arrays (H, W).
     """
-    container = av.open(str(mkv_path))
-    stream = container.streams.video[1]
+    probe = av.open(str(mkv_path))
+    stream = probe.streams.video[1]
+    w, h = stream.width, stream.height
+    probe.close()
+
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-i", str(mkv_path),
+            "-map", "0:v:1",
+            "-f", "rawvideo", "-pix_fmt", "gray16le",
+            "-v", "error",
+            "pipe:1",
+        ],
+        capture_output=True,
+    )
+
+    frame_bytes = w * h * 2
+    raw = proc.stdout
+    n = len(raw) // frame_bytes
     frames = []
-    for frame in container.decode(stream):
-        arr = frame.to_ndarray()  # (H, W) uint16 for gray16le
-        frames.append(arr)
-    container.close()
+    for i in range(n):
+        arr = np.frombuffer(raw, dtype=np.uint16, count=w * h, offset=i * frame_bytes)
+        frames.append(arr.reshape(h, w).copy())
     return frames
 
 
@@ -325,18 +357,43 @@ def save_info(info_path: Path, info: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Sample frame preview
+# ---------------------------------------------------------------------------
+
+def save_sample_frame(
+    sample_dir: Path,
+    stem: str,
+    idx: int,
+    rgb_frames: list[np.ndarray],
+    depth_frames_u8: list[np.ndarray],
+    actions: list[list[float]],
+) -> None:
+    """Save one random frame at both resolutions for quick visual inspection."""
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    rgb = rgb_frames[idx]
+    depth = depth_frames_u8[idx]
+
+    rgb_lo = cv2.resize(rgb, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
+    rgb_hi = cv2.resize(rgb, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
+    depth_lo = cv2.resize(depth, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
+    depth_hi = cv2.resize(depth, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
+
+    prefix = f"{stem}_f{idx}"
+    cv2.imwrite(str(sample_dir / f"{prefix}_rgb_lo.png"), cv2.cvtColor(rgb_lo, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(sample_dir / f"{prefix}_rgb_hi.png"), cv2.cvtColor(rgb_hi, cv2.COLOR_RGB2BGR))
+    cv2.imwrite(str(sample_dir / f"{prefix}_depth_lo.png"), depth_lo)
+    cv2.imwrite(str(sample_dir / f"{prefix}_depth_hi.png"), depth_hi)
+
+    with open(sample_dir / f"{prefix}_action.json", "w") as f:
+        json.dump({"frame": idx, "action": actions[idx]}, f, indent=2)
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
-def find_pairs(raw_dir: Path) -> list[tuple[Path, Path]]:
-    pairs = []
-    for mkv in sorted(raw_dir.glob("*.mkv")):
-        hands = mkv.with_name(f"{mkv.stem}_hands.ndjson")
-        if hands.exists():
-            pairs.append((mkv, hands))
-        else:
-            print(f"  SKIP {mkv.name}: no matching _hands.ndjson")
-    return pairs
+def find_mkvs(raw_dir: Path) -> list[Path]:
+    return sorted(raw_dir.glob("*.mkv"))
 
 
 def parse_args() -> argparse.Namespace:
@@ -367,16 +424,16 @@ def process_split(
         print(f"  Clearing existing {split_dir} ...")
         shutil.rmtree(split_dir)
 
-    print(f"\nScanning {split_raw} for MKV + hands.ndjson pairs ...")
-    pairs = find_pairs(split_raw)
-    if not pairs:
-        print("  No file pairs found.")
+    print(f"\nScanning {split_raw} for MKV files ...")
+    mkvs = find_mkvs(split_raw)
+    if not mkvs:
+        print("  No MKV files found.")
         return
-    print(f"  Found {len(pairs)} pair(s)\n")
+    print(f"  Found {len(mkvs)} file(s)\n")
 
     info = load_info(info_path)
 
-    for mkv_path, hands_path in pairs:
+    for mkv_path in mkvs:
         stem = mkv_path.stem
         print(f"{'='*60}")
         print(f"Processing: {stem}")
@@ -402,9 +459,18 @@ def process_split(
         frames = merge_rgbd(rgb_frames, depth_frames_u8)
         print(f"    {len(frames)} RGBD frames, shape {frames[0].shape}")
 
-        print(f"  Inferring actions from {hands_path.name} ...")
-        actions = infer_actions(hands_path, n_frames)
+        print(f"  Extracting hand landmarks from {mkv_path.name} (track 3) ...")
+        hands_by_frame = extract_hand_landmarks(mkv_path)
+        print(f"    {len(hands_by_frame)} hand landmark packets")
+
+        print(f"  Inferring actions ...")
+        actions = infer_actions(hands_by_frame, n_frames)
         print(f"    {len(actions)} actions inferred")
+
+        sample_idx = random.randint(0, n_frames - 1)
+        sample_dir = out_dir / "samples"
+        save_sample_frame(sample_dir, stem, sample_idx, rgb_frames, depth_frames_u8, actions)
+        print(f"  Saved sample frame {sample_idx} to {sample_dir}")
 
         n_full_chunks = n_frames // chunk_size
         tail = n_frames - n_full_chunks * chunk_size
