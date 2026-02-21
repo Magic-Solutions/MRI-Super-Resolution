@@ -14,3 +14,5 @@ wandb==0.17.0
 av
 ffmpeg-python
 torchvision==0.19.1
+google-cloud-storage
+google-cloud-secret-manager
