@@ -1,0 +1,4 @@
+name: diamond-vertex-infra
+runtime:
+  name: python
+description: Infra for Vertex AI custom training runs on DIAMOND fork
