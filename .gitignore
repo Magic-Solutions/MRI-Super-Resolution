@@ -1,6 +1,7 @@
 # Custom
 wandb
 .vscode
+.tmp
 outputs
 results/figures
 slurm*
@@ -8,6 +9,7 @@ experiments
 checkpoints
 saved_runs
 dataset
+training_preview.mp4
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -24,3 +26,8 @@ __pycache__/
 *.npy
 *.png
 *.json
+
+# Infra / local state
+infra/pulumi-gcp/.venv/
+infra/pulumi-gcp/.pulumi/
+infra/pulumi-gcp/Pulumi.*.yaml

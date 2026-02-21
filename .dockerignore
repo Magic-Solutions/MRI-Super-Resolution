@@ -1,0 +1,29 @@
+.git
+.gitignore
+.cursor
+.tmp
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.DS_Store
+
+# Local outputs/artifacts
+wandb/
+outputs/
+checkpoints/
+saved_runs/
+experiments/
+dataset/
+training_preview.mp4
+*.hdf5
+*.mkv
+*.ndjson
+*.pt
+*.npy
+*.png
+
+# Local infra/dev env
+infra/pulumi-gcp/.venv/
+infra/pulumi-gcp/.pulumi/
+infra/pulumi-gcp/Pulumi.*.yaml

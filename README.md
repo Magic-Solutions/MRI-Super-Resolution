@@ -62,6 +62,55 @@ You can then launch a training run with `python src/main.py`.
 
 The provided configuration took 12 days on a RTX 4090.
 
+## Vertex AI custom-job training
+
+This fork includes a managed training flow for Google Cloud Vertex AI Custom Jobs with:
+- local sample-data preview before launch,
+- recording-level selection from GCS (`--recording-uri`, `--manifest`, or prefix listing),
+- service-account-based access (no runtime `gcloud auth` call),
+- W&B metric tracking and GCS artifact upload.
+
+### 1) Provision runtime infra with Pulumi
+
+Use the stack in `infra/pulumi-gcp` to provision:
+- runtime service account,
+- bucket IAM access,
+- Artifact Registry repository,
+- Secret Manager access for `WANDB_API_KEY`,
+- default Vertex worker spec (single A100 by default).
+
+### 2) Build and push the training image
+
+```bash
+docker build -f Dockerfile.vertex -t REGION-docker.pkg.dev/PROJECT/REPO/diamond-train:latest .
+docker push REGION-docker.pkg.dev/PROJECT/REPO/diamond-train:latest
+```
+
+### 3) Launch with preview + confirmation
+
+```bash
+pip install -r requirements-preview.txt
+
+python scripts/launch_vertex_training.py \
+  --recording-uri train=gs://INPUT_BUCKET/path/to/file_a.mkv \
+  --recording-uri test=gs://INPUT_BUCKET/path/to/file_b.mkv
+```
+
+The launcher auto-loads defaults from `infra/pulumi-gcp` (`project`, `region`, `service account`, artifact bucket, and image base). Override any of them explicitly with CLI flags if needed.
+
+Useful run-duration flags:
+- `--smoke-test` (uses `trainer_smoke`)
+- `--epochs <N>`
+- `--steps-per-epoch <N>` (applies to denoiser + upsampler)
+- `--denoiser-steps-per-epoch <N>`
+- `--upsampler-steps-per-epoch <N>`
+- `--eval-every <N>`
+
+Image workflow flag:
+- `--push-latest` uses Cloud Build (`gcloud builds submit --file Dockerfile.vertex`) to build and push the resolved `:latest` image before preview/submit.
+
+Depth preprocessing is fixed to clip mm depth to `[200, 3000]` and map to `uint8` by default. Override with `--depth-min-mm` / `--depth-max-mm` if needed.
+
 ---
 
 <a name="citation"></a>
