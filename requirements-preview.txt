@@ -1,0 +1,10 @@
+# Minimal dependencies for local data preview + Vertex launch flow.
+# This does not include full training/runtime cloud dependencies.
+
+numpy==1.26.0
+opencv-python==4.10.0.84
+h5py==3.11.0
+av
+torch==2.4.1
+torchvision==0.19.1
+google-cloud-storage
