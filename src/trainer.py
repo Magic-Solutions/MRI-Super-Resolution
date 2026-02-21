@@ -294,8 +294,10 @@ class Trainer(StateDictMixin):
                 dist.barrier()
 
         # Last collect
-        if self._rank == 0 and not self._is_static_dataset:
-            wandb_log(self.collect_test(final=True), self.epoch)
+        if self._rank == 0:
+            if not self._is_static_dataset:
+                wandb_log(self.collect_test(final=True), self.epoch)
+            wandb.finish()
 
     def collect_initial_dataset(self) -> Tuple[int, Logs]:
         print("\nInitial collect\n")

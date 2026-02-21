@@ -36,6 +36,8 @@ RAW_DIR = Path(__file__).resolve().parent.parent
 FULL_RES = (150, 280)
 LOW_RES = (30, 56)
 CHUNK_SIZE = 1000
+DEPTH_MIN_MM = 200
+DEPTH_MAX_MM = 3000
 
 # Action vector layout (51 dims)
 N_KEYS = 11
@@ -228,22 +230,12 @@ def extract_depth_frames(mkv_path: Path) -> list[np.ndarray]:
 
 def normalize_depth_to_uint8(
     depth_frames: list[np.ndarray],
-    depth_bounds: tuple[float, float] | None = None,
-    lo_pct: float = 3.0,
-    hi_pct: float = 97.0,
+    depth_bounds: tuple[float, float] = (DEPTH_MIN_MM, DEPTH_MAX_MM),
 ) -> list[np.ndarray]:
-    """Normalize 16-bit depth frames to 8-bit.
-
-    If depth_bounds is provided, uses those fixed (p_lo, p_hi) values for
-    all frames so that the same physical depth always maps to the same
-    pixel value.  Otherwise falls back to per-frame percentile clipping.
-
-    Zeros (invalid/no-return pixels) are kept as zero.  Non-zero values are
-    clipped to [lo, hi] then linearly mapped to [1, 255].
-    """
+    """Normalize 16-bit depth frames to 8-bit using fixed physical bounds."""
     out = []
     for d in depth_frames:
-        out.append(normalize_depth_frame(d, depth_bounds, lo_pct, hi_pct))
+        out.append(normalize_depth_frame(d, depth_bounds))
     return out
 
 
@@ -312,56 +304,20 @@ def iter_depth_frames(mkv_path: Path):
         proc.wait()
 
 
-def compute_global_depth_bounds(
-    mkvs: list[Path],
-    lo_pct: float = 3.0,
-    hi_pct: float = 97.0,
-    sample_every: int = 10,
-) -> tuple[float, float]:
-    """Compute global depth percentile bounds across all MKV files.
-
-    Samples every Nth depth frame to keep memory and time reasonable.
-    Returns (p_lo, p_hi) in uint16 depth units.
-    """
-    all_vals: list[np.ndarray] = []
-    for mkv_path in mkvs:
-        print(f"    Scanning depth: {mkv_path.name} ...")
-        for i, d in enumerate(iter_depth_frames(mkv_path)):
-            if i % sample_every != 0:
-                continue
-            mask = d > 0
-            if mask.any():
-                vals = d[mask].ravel()
-                stride = max(1, len(vals) // 2000)
-                all_vals.append(vals[::stride])
-    combined = np.concatenate(all_vals)
-    p_lo = float(np.percentile(combined, lo_pct))
-    p_hi = float(np.percentile(combined, hi_pct))
-    print(f"    Global depth bounds: [{p_lo:.0f}, {p_hi:.0f}] (uint16)")
-    return p_lo, p_hi
-
-
 def normalize_depth_frame(
     d: np.ndarray,
-    depth_bounds: tuple[float, float] | None = None,
-    lo_pct: float = 3.0,
-    hi_pct: float = 97.0,
+    depth_bounds: tuple[float, float] = (DEPTH_MIN_MM, DEPTH_MAX_MM),
 ) -> np.ndarray:
-    """Normalize a single 16-bit depth frame to 8-bit.
+    """Normalize one 16-bit depth frame to 8-bit with fixed mm bounds.
 
-    If depth_bounds is provided, uses those fixed (p_lo, p_hi) values.
-    Otherwise falls back to per-frame percentile clipping.
+    Zero depth is treated as invalid and remains zero in the output.
+    Non-zero values are clipped to [depth_min, depth_max] and mapped to [1, 255].
     """
     result = np.zeros(d.shape, dtype=np.uint8)
     mask = d > 0
     if not mask.any():
         return result
-    if depth_bounds is not None:
-        p_lo, p_hi = depth_bounds
-    else:
-        vals = d[mask].astype(np.float32)
-        p_lo = np.percentile(vals, lo_pct)
-        p_hi = np.percentile(vals, hi_pct)
+    p_lo, p_hi = depth_bounds
     if p_hi <= p_lo:
         return result
     clipped = np.clip(d.astype(np.float32), p_lo, p_hi)
@@ -503,8 +459,26 @@ def find_mkvs(raw_dir: Path) -> list[Path]:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("out_dir", type=Path, help="Root output directory (e.g. src/processed_data_omgrab)")
+    parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=RAW_DIR,
+        help=f"Root raw-data directory containing train/ and test/ (default: {RAW_DIR})",
+    )
     parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
                         help=f"Max frames per episode (default: {CHUNK_SIZE})")
+    parser.add_argument(
+        "--depth-min-mm",
+        type=int,
+        default=DEPTH_MIN_MM,
+        help=f"Minimum valid depth in millimeters for clipping (default: {DEPTH_MIN_MM})",
+    )
+    parser.add_argument(
+        "--depth-max-mm",
+        type=int,
+        default=DEPTH_MAX_MM,
+        help=f"Maximum valid depth in millimeters for clipping (default: {DEPTH_MAX_MM})",
+    )
     return parser.parse_args()
 
 
@@ -513,6 +487,7 @@ def process_split(
     raw_dir: Path,
     out_dir: Path,
     chunk_size: int,
+    depth_bounds: tuple[float, float],
 ) -> None:
     """Process a single split (train or test).
 
@@ -534,10 +509,6 @@ def process_split(
         print("  No MKV files found.")
         return
     print(f"  Found {len(mkvs)} file(s)")
-
-    print(f"\n  Computing global depth bounds ...")
-    depth_bounds = compute_global_depth_bounds(mkvs)
-    print()
 
     info = load_info(info_path)
 
@@ -657,16 +628,22 @@ def process_split(
 
 def main() -> None:
     args = parse_args()
+    if args.depth_max_mm <= args.depth_min_mm:
+        raise ValueError("--depth-max-mm must be greater than --depth-min-mm")
+    depth_bounds = (float(args.depth_min_mm), float(args.depth_max_mm))
 
     if args.out_dir.exists():
         print(f"Clearing existing {args.out_dir} ...")
         shutil.rmtree(args.out_dir)
 
+    print(f"Using raw data root: {args.raw_dir}")
+    print(f"Depth normalization: clip [{args.depth_min_mm}, {args.depth_max_mm}] mm -> uint8")
+
     for split in ("train", "test"):
         print(f"\n{'#'*60}")
         print(f"# Split: {split}")
         print(f"{'#'*60}")
-        process_split(split, RAW_DIR, args.out_dir, args.chunk_size)
+        process_split(split, args.raw_dir, args.out_dir, args.chunk_size, depth_bounds)
 
     print(f"\n{'='*60}")
     print(f"Dataset written to {args.out_dir}")
