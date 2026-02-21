@@ -26,6 +26,7 @@ __pycache__/
 *.npy
 *.png
 *.json
+*.python-version
 
 # Infra / local state
 infra/pulumi-gcp/.venv/
