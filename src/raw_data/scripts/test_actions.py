@@ -2,11 +2,11 @@ import json
 import sys
 from dataclasses import dataclass, field
 
+import av
 import cv2
 import numpy as np
 
 MKV_PATH = "421c63b0-1036-4300-b0a3-0b0d81f8c68b.mkv"
-HANDS_PATH = "421c63b0-1036-4300-b0a3-0b0d81f8c68b_hands.ndjson"
 OUT_PATH = "421c63b0-1036-4300-b0a3-0b0d81f8c68b_actions.ndjson"
 
 # CS:GO action vector layout (51 dims total)
@@ -43,9 +43,12 @@ HAND_CONNECTIONS = [
     (5, 9), (9, 13), (13, 17),
 ]
 
-DIRECTION_THRESHOLD = 0.008
 GRIP_THRESHOLD = 1.1
-SMOOTHING = 0.4
+VELOCITY_EMA_ALPHA = 0.65
+VELOCITY_GAIN = 1.5
+SPEED_ON_THRESHOLD = 0.005
+SPEED_OFF_THRESHOLD = 0.0035
+DIAGONAL_RATIO_THRESHOLD = 0.35
 
 
 @dataclass
@@ -54,33 +57,103 @@ class ActionState:
     prev_y: float | None = None
     smooth_dx: float = 0.0
     smooth_dy: float = 0.0
-    pending_dx: float = 0.0
-    pending_dy: float = 0.0
     left: bool = False
     right: bool = False
     up: bool = False
     down: bool = False
     grip: bool = False
+    moving: bool = False
+    ema_samples: int = 0
     history: list = field(default_factory=list)
 
 
-def load_hand_data(path: str) -> dict[int, list]:
-    data: dict[int, list] = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            data[entry["f"]] = entry["h"]
-    return data
+def extract_hand_landmarks(mkv_path: str) -> dict[int, list]:
+    """Map subtitle packets to video frame indices using MKV timestamps."""
+    def _extract_hands(entry: dict) -> list:
+        if isinstance(entry.get("h"), list):
+            return entry["h"]
+        if isinstance(entry.get("hands"), list):
+            return entry["hands"]
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            if isinstance(payload.get("h"), list):
+                return payload["h"]
+            if isinstance(payload.get("hands"), list):
+                return payload["hands"]
+        return []
+
+    def _select_hand_stream_index(path: str) -> int | None:
+        probe = av.open(path)
+        subtitle_indices = [i for i, s in enumerate(probe.streams) if s.type == "subtitle"]
+        probe.close()
+        for idx in subtitle_indices:
+            c = av.open(path)
+            stream = c.streams[idx]
+            found = False
+            checked = 0
+            for pkt in c.demux(stream):
+                if pkt.size == 0:
+                    continue
+                raw = bytes(pkt).decode("utf-8", errors="replace").strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                checked += 1
+                if _extract_hands(entry):
+                    found = True
+                    break
+                if checked >= 50:
+                    break
+            c.close()
+            if found:
+                return idx
+        return None
+
+    stream_idx = _select_hand_stream_index(mkv_path)
+    if stream_idx is None:
+        return {}
+
+    container = av.open(mkv_path)
+    video_stream = container.streams.video[0]
+    subtitle_stream = container.streams[stream_idx]
+    fps = float(video_stream.average_rate) if video_stream.average_rate else 25.0
+    video_start_time = (
+        float(video_stream.start_time * video_stream.time_base)
+        if video_stream.start_time is not None
+        else 0.0
+    )
+    hands_by_frame: dict[int, list] = {}
+
+    for pkt in container.demux(subtitle_stream):
+        if pkt.size == 0 or pkt.pts is None:
+            continue
+        raw = bytes(pkt).decode("utf-8").strip()
+        if not raw:
+            continue
+        entry = json.loads(raw)
+        pkt_time = float(pkt.pts * subtitle_stream.time_base)
+        frame_idx = int(round((pkt_time - video_start_time) * fps))
+        if frame_idx < 0:
+            continue
+        hands_by_frame[frame_idx] = _extract_hands(entry)
+    container.close()
+    return hands_by_frame
 
 
 def get_right_hand(hands: list) -> dict | None:
+    # Prefer explicit right hand, but gracefully fall back when handedness
+    # labels are delayed, flipped, or missing in early frames.
+    if not hands:
+        return None
     for h in hands:
         if h.get("handedness") == "Right":
             return h
-    return None
+    if len(hands) == 1:
+        return hands[0]
+    return max(hands, key=lambda h: float(h.get("score", 0.0)))
 
 
 def detect_grip(landmarks: list) -> bool:
@@ -101,33 +174,81 @@ def detect_grip(landmarks: list) -> bool:
     return np.mean(ratios) < GRIP_THRESHOLD
 
 
-def update_actions(state: ActionState, landmarks: list | None) -> None:
-    # Apply the *previous* frame's pending deltas as this frame's actions.
-    # The delta pos[N] - pos[N-1] describes movement during frame N-1.
-    state.left = state.pending_dx < -DIRECTION_THRESHOLD
-    state.right = state.pending_dx > DIRECTION_THRESHOLD
-    state.up = state.pending_dy < -DIRECTION_THRESHOLD
-    state.down = state.pending_dy > DIRECTION_THRESHOLD
+def get_tracking_point(landmarks: list) -> tuple[float, float]:
+    """Use a palm-center proxy to reduce single-keypoint jitter."""
+    track_ids = [WRIST, INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]
+    pts = np.array([landmarks[i][:2] for i in track_ids], dtype=np.float32)
+    center = pts.mean(axis=0)
+    return float(center[0]), float(center[1])
 
+
+def movement_from_velocity(dx: float, dy: float, was_moving: bool) -> tuple[bool, bool, bool, bool, bool]:
+    """Map smoothed image-space velocity to movement keys with hysteresis."""
+    speed = float(np.hypot(dx, dy))
+    moving = speed > (SPEED_OFF_THRESHOLD if was_moving else SPEED_ON_THRESHOLD)
+    if not moving:
+        return False, False, False, False, False
+
+    ax, ay = abs(dx), abs(dy)
+    dominant = max(ax, ay)
+    subordinate = min(ax, ay)
+    ratio = subordinate / (dominant + 1e-8)
+
+    if ratio < DIAGONAL_RATIO_THRESHOLD:
+        # Minor axis is too weak: emit only dominant cardinal direction.
+        if ay >= ax:
+            up = dy < 0.0
+            down = dy > 0.0
+            left = False
+            right = False
+        else:
+            left = dx < 0.0
+            right = dx > 0.0
+            up = False
+            down = False
+    else:
+        # Axes are comparable: allow true diagonals.
+        up = dy < 0.0
+        down = dy > 0.0
+        left = dx < 0.0
+        right = dx > 0.0
+
+    return left, right, up, down, moving
+
+
+def update_actions(state: ActionState, landmarks: list | None) -> None:
     if landmarks is None:
         state.prev_x = state.prev_y = None
         state.smooth_dx = state.smooth_dy = 0.0
-        state.pending_dx = state.pending_dy = 0.0
+        state.ema_samples = 0
         state.grip = False
+        state.moving = False
+        state.left = state.right = state.up = state.down = False
         return
 
     state.grip = detect_grip(landmarks)
 
-    x, y = landmarks[INDEX_MCP][0], landmarks[INDEX_MCP][1]
+    x, y = get_tracking_point(landmarks)
     if state.prev_x is not None:
         raw_dx = x - state.prev_x
         raw_dy = y - state.prev_y
-        state.smooth_dx = SMOOTHING * raw_dx + (1 - SMOOTHING) * state.smooth_dx
-        state.smooth_dy = SMOOTHING * raw_dy + (1 - SMOOTHING) * state.smooth_dy
-
-    state.pending_dx = state.smooth_dx
-    state.pending_dy = state.smooth_dy
+        state.smooth_dx = VELOCITY_EMA_ALPHA * raw_dx + (1 - VELOCITY_EMA_ALPHA) * state.smooth_dx
+        state.smooth_dy = VELOCITY_EMA_ALPHA * raw_dy + (1 - VELOCITY_EMA_ALPHA) * state.smooth_dy
+        state.ema_samples += 1
     state.prev_x, state.prev_y = x, y
+
+    # Correct EMA startup bias so early movement is not artificially muted.
+    if state.ema_samples > 0:
+        bias = 1.0 - (1.0 - VELOCITY_EMA_ALPHA) ** state.ema_samples
+        eff_dx = state.smooth_dx / max(bias, 1e-8)
+        eff_dy = state.smooth_dy / max(bias, 1e-8)
+    else:
+        eff_dx = 0.0
+        eff_dy = 0.0
+
+    state.left, state.right, state.up, state.down, state.moving = movement_from_velocity(
+        VELOCITY_GAIN * eff_dx, VELOCITY_GAIN * eff_dy, state.moving
+    )
 
 
 def encode_action(state: ActionState) -> list[float]:
@@ -215,7 +336,7 @@ def draw_hud(frame: np.ndarray, state: ActionState) -> None:
 
 
 def main() -> None:
-    hands_by_frame = load_hand_data(HANDS_PATH)
+    hands_by_frame = extract_hand_landmarks(MKV_PATH)
     cap = cv2.VideoCapture(MKV_PATH)
     if not cap.isOpened():
         print(f"Cannot open {MKV_PATH}")
@@ -225,6 +346,7 @@ def main() -> None:
     action_records: list[dict] = []
     paused = False
     frame_idx = 0
+    latest_hands: list = []
 
     while True:
         if not paused:
@@ -233,7 +355,9 @@ def main() -> None:
                 break
 
             h, w = frame.shape[:2]
-            hands = hands_by_frame.get(frame_idx, [])
+            if frame_idx in hands_by_frame:
+                latest_hands = hands_by_frame[frame_idx]
+            hands = latest_hands
             right = get_right_hand(hands)
 
             if right:

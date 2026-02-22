@@ -1,11 +1,11 @@
 import json
 import sys
 
+import av
 import cv2
 import numpy as np
 
 MKV_PATH = "a754c773-f455-47c3-8e23-a0d733c4ccdd.mkv"
-HANDS_PATH = "a754c773-f455-47c3-8e23-a0d733c4ccdd_hands.ndjson"
 
 HAND_CONNECTIONS = [
     (0, 1), (1, 2), (2, 3), (3, 4),
@@ -22,15 +22,79 @@ HANDEDNESS_COLORS = {
 }
 
 
-def load_hand_data(path: str) -> dict[int, list]:
+def extract_hand_landmarks(mkv_path: str) -> dict[int, list]:
+    """Map subtitle packets to video frame indices using MKV timestamps."""
+    def _extract_hands(entry: dict) -> list:
+        if isinstance(entry.get("h"), list):
+            return entry["h"]
+        if isinstance(entry.get("hands"), list):
+            return entry["hands"]
+        payload = entry.get("payload")
+        if isinstance(payload, dict):
+            if isinstance(payload.get("h"), list):
+                return payload["h"]
+            if isinstance(payload.get("hands"), list):
+                return payload["hands"]
+        return []
+
+    def _select_hand_stream_index(path: str) -> int | None:
+        probe = av.open(path)
+        subtitle_indices = [i for i, s in enumerate(probe.streams) if s.type == "subtitle"]
+        probe.close()
+        for idx in subtitle_indices:
+            c = av.open(path)
+            stream = c.streams[idx]
+            found = False
+            checked = 0
+            for pkt in c.demux(stream):
+                if pkt.size == 0:
+                    continue
+                raw = bytes(pkt).decode("utf-8", errors="replace").strip()
+                if not raw:
+                    continue
+                try:
+                    entry = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                checked += 1
+                if _extract_hands(entry):
+                    found = True
+                    break
+                if checked >= 50:
+                    break
+            c.close()
+            if found:
+                return idx
+        return None
+
+    stream_idx = _select_hand_stream_index(mkv_path)
+    if stream_idx is None:
+        return {}
+
+    container = av.open(mkv_path)
+    video_stream = container.streams.video[0]
+    subtitle_stream = container.streams[stream_idx]
+    fps = float(video_stream.average_rate) if video_stream.average_rate else 25.0
+    video_start_time = (
+        float(video_stream.start_time * video_stream.time_base)
+        if video_stream.start_time is not None
+        else 0.0
+    )
     hands_by_frame: dict[int, list] = {}
-    with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            hands_by_frame[entry["f"]] = entry["h"]
+
+    for pkt in container.demux(subtitle_stream):
+        if pkt.size == 0 or pkt.pts is None:
+            continue
+        raw = bytes(pkt).decode("utf-8").strip()
+        if not raw:
+            continue
+        entry = json.loads(raw)
+        pkt_time = float(pkt.pts * subtitle_stream.time_base)
+        frame_idx = int(round((pkt_time - video_start_time) * fps))
+        if frame_idx < 0:
+            continue
+        hands_by_frame[frame_idx] = _extract_hands(entry)
+    container.close()
     return hands_by_frame
 
 
@@ -62,7 +126,7 @@ def draw_hand(frame: np.ndarray, hand: dict, w: int, h: int) -> None:
 
 
 def main() -> None:
-    hands_by_frame = load_hand_data(HANDS_PATH)
+    hands_by_frame = extract_hand_landmarks(MKV_PATH)
 
     cap = cv2.VideoCapture(MKV_PATH)
     if not cap.isOpened():
@@ -71,6 +135,7 @@ def main() -> None:
 
     paused = False
     frame_idx = 0
+    latest_hands: list = []
 
     while True:
         if not paused:
@@ -79,7 +144,9 @@ def main() -> None:
                 break
 
             h, w = frame.shape[:2]
-            hands = hands_by_frame.get(frame_idx, [])
+            if frame_idx in hands_by_frame:
+                latest_hands = hands_by_frame[frame_idx]
+            hands = latest_hands
             for hand in hands:
                 draw_hand(frame, hand, w, h)
 
