@@ -111,6 +111,52 @@ Image workflow flag:
 
 Depth preprocessing is fixed to clip mm depth to `[200, 3000]` and map to `uint8` by default. Override with `--depth-min-mm` / `--depth-max-mm` if needed.
 
+### 4) Typical launch examples
+
+Smoke test on one recording (skip preview for speed):
+
+```bash
+python scripts/launch_vertex_training.py \
+  --recording-uri train=gs://omgrab-our-exports/om002/cookie_openhand.mkv \
+  --smoke-test \
+  --skip-preview
+```
+
+Full run with preview gate and explicit train/test recordings:
+
+```bash
+python scripts/launch_vertex_training.py \
+  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
+  --recording-uri test=gs://INPUT_BUCKET/path/to/test_clip.mkv
+```
+
+Run with shorter training duration overrides:
+
+```bash
+python scripts/launch_vertex_training.py \
+  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
+  --epochs 10 \
+  --steps-per-epoch 50 \
+  --eval-every 1
+```
+
+Rebuild/push latest image before submit:
+
+```bash
+python scripts/launch_vertex_training.py \
+  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
+  --push-latest \
+  --skip-preview
+```
+
+Use a manifest file for many recordings:
+
+```bash
+python scripts/launch_vertex_training.py \
+  --manifest path/to/recordings_manifest.txt \
+  --skip-preview
+```
+
 ---
 
 <a name="citation"></a>
