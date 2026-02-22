@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import ExitStack
 import json
 import random
 import shlex
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -452,89 +452,97 @@ def main() -> None:
     if not entries:
         raise ValueError("No recordings selected. Provide --recording-uri, --manifest, or --prefix.")
 
-    tmp_dir = Path(".tmp") / f"vertex_launch_{run_name}"
-    raw_preview_dir = tmp_dir / "raw_data"
-    processed_preview_dir = tmp_dir / "processed_preview"
-    manifest_local = tmp_dir / "recordings_manifest.txt"
-    write_manifest(manifest_local, entries)
-    print(f"Selected {len(entries)} recording(s). Manifest: {manifest_local}")
+    with ExitStack() as stack:
+        tmp_root = Path(".tmp")
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        tmp_dir = Path(
+            stack.enter_context(
+                tempfile.TemporaryDirectory(
+                    dir=str(tmp_root),
+                    prefix=f"vertex_launch_{run_name}_",
+                )
+            )
+        )
+        raw_preview_dir = tmp_dir / "raw_data"
+        processed_preview_dir = tmp_dir / "processed_preview"
+        manifest_local = tmp_dir / "recordings_manifest.txt"
 
-    if not args.skip_preview:
-        download_preview_sample(entries, args.preview_sample_count, raw_preview_dir, project)
-        run_preview_pipeline(args, raw_preview_dir, processed_preview_dir)
-        print(f"Preview video: {args.preview_output}")
-        maybe_open_preview(args.preview_output)
+        write_manifest(manifest_local, entries)
+        print(f"Selected {len(entries)} recording(s). Manifest: {manifest_local}")
 
-    print_submission_summary(
-        run_name=run_name,
-        display_name=display_name,
-        config_name=config_name,
-        project=project,
-        region=region,
-        service_account=service_account,
-        image_uri=image_uri,
-        output_uri=output_uri,
-        manifest_local=manifest_local,
-        entries=entries,
-        args=args,
-        train_overrides=train_overrides,
-    )
+        if not args.skip_preview:
+            download_preview_sample(entries, args.preview_sample_count, raw_preview_dir, project)
+            run_preview_pipeline(args, raw_preview_dir, processed_preview_dir)
+            print(f"Preview video: {args.preview_output}")
+            maybe_open_preview(args.preview_output)
 
-    if not args.yes:
-        answer = input("Submit Vertex job with this recording set? [y/N] ").strip().lower()
-        if answer not in {"y", "yes"}:
-            print("Cancelled.")
-            return
+        print_submission_summary(
+            run_name=run_name,
+            display_name=display_name,
+            config_name=config_name,
+            project=project,
+            region=region,
+            service_account=service_account,
+            image_uri=image_uri,
+            output_uri=output_uri,
+            manifest_local=manifest_local,
+            entries=entries,
+            args=args,
+            train_overrides=train_overrides,
+        )
 
-    manifest_uri = upload_manifest(manifest_local, output_uri, project)
-    print(f"Uploaded run manifest to {manifest_uri}")
+        if not args.yes:
+            answer = input("Submit Vertex job with this recording set? [y/N] ").strip().lower()
+            if answer not in {"y", "yes"}:
+                print("Cancelled.")
+                return
 
-    submit_cmd = [
-        sys.executable,
-        "scripts/submit_vertex_job.py",
-        "--project",
-        project,
-        "--region",
-        region,
-        "--display-name",
-        display_name,
-        "--run-name",
-        run_name,
-        "--image-uri",
-        image_uri,
-        "--service-account",
-        service_account,
-        "--recordings-manifest-uri",
-        manifest_uri,
-        "--output-uri",
-        output_uri,
-        "--wandb-secret",
-        args.wandb_secret,
-        "--config-name",
-        config_name,
-        "--machine-type",
-        args.machine_type,
-        "--accelerator-type",
-        args.accelerator_type,
-        "--accelerator-count",
-        str(args.accelerator_count),
-        "--boot-disk-size-gb",
-        str(args.boot_disk_size_gb),
-        "--chunk-size",
-        str(args.chunk_size),
-        "--depth-min-mm",
-        str(args.depth_min_mm),
-        "--depth-max-mm",
-        str(args.depth_max_mm),
-        "--train-overrides",
-        train_overrides,
-    ]
-    if args.dry_run:
-        submit_cmd.append("--dry-run")
-    subprocess.run(submit_cmd, check=True)
-    if not args.dry_run:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-        print(f"Removed temporary launch artifacts: {tmp_dir}")
+        manifest_uri = upload_manifest(manifest_local, output_uri, project)
+        print(f"Uploaded run manifest to {manifest_uri}")
+
+        submit_cmd = [
+            sys.executable,
+            "scripts/submit_vertex_job.py",
+            "--project",
+            project,
+            "--region",
+            region,
+            "--display-name",
+            display_name,
+            "--run-name",
+            run_name,
+            "--image-uri",
+            image_uri,
+            "--service-account",
+            service_account,
+            "--recordings-manifest-uri",
+            manifest_uri,
+            "--output-uri",
+            output_uri,
+            "--wandb-secret",
+            args.wandb_secret,
+            "--config-name",
+            config_name,
+            "--machine-type",
+            args.machine_type,
+            "--accelerator-type",
+            args.accelerator_type,
+            "--accelerator-count",
+            str(args.accelerator_count),
+            "--boot-disk-size-gb",
+            str(args.boot_disk_size_gb),
+            "--chunk-size",
+            str(args.chunk_size),
+            "--depth-min-mm",
+            str(args.depth_min_mm),
+            "--depth-max-mm",
+            str(args.depth_max_mm),
+            "--train-overrides",
+            train_overrides,
+        ]
+        if args.dry_run:
+            submit_cmd.append("--dry-run")
+        subprocess.run(submit_cmd, check=True)
 
 
 if __name__ == "__main__":
