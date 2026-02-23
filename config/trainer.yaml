@@ -4,6 +4,8 @@ defaults:
   - agent: csgo
   - world_model_env: fast
 
+use_depth: true
+
 hydra:
   job:
     chdir: True

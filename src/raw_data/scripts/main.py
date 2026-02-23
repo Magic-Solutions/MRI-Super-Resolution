@@ -2,7 +2,7 @@
 
 Scans raw_data/train/ and raw_data/test/ for .mkv files containing:
     - Track 0: RGB video (H.264)
-    - Track 1: Depth video (FFV1, gray16le)
+    - Track 1: Depth video (FFV1, gray16le, optional)
     - Track 3: Hand landmarks (SRT subtitle, JSON per packet)
 
 For each split:
@@ -676,6 +676,12 @@ def parse_args() -> argparse.Namespace:
         default=DEPTH_MAX_MM,
         help=f"Maximum valid depth in millimeters for clipping (default: {DEPTH_MAX_MM})",
     )
+    parser.add_argument(
+        "--use-depth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include depth channel in processed data (default: true)",
+    )
     return parser.parse_args()
 
 
@@ -685,10 +691,11 @@ def process_split(
     out_dir: Path,
     chunk_size: int,
     depth_bounds: tuple[float, float],
+    use_depth: bool,
 ) -> None:
     """Process a single split (train or test).
 
-    Streams RGB + depth frames and processes them in chunk-sized batches
+    Streams RGB (and optional depth) frames and processes them in chunk-sized batches
     so that only ~chunk_size frames are in memory at a time.
     """
     split_raw = raw_dir / split
@@ -718,7 +725,7 @@ def process_split(
         hands_by_frame = extract_hand_landmarks(mkv_path)
         print(f"    {len(hands_by_frame)} hand landmark packets (timestamp-mapped)")
 
-        print(f"  Streaming RGB + depth in chunks of {chunk_size} ...")
+        print(f"  Streaming RGB{' + depth' if use_depth else ''} in chunks of {chunk_size} ...")
         action_state = ActionState()
         chunk_rgbd: list[np.ndarray] = []
         chunk_actions: list[list[float]] = []
@@ -732,11 +739,22 @@ def process_split(
         latest_hands: list = []
 
         rgb_gen = iter_rgb_frames(mkv_path)
-        depth_gen = iter_depth_frames(mkv_path)
+        depth_gen = iter_depth_frames(mkv_path) if use_depth else None
         try:
-            for rgb, depth_raw in zip(rgb_gen, depth_gen):
-                depth_u8 = normalize_depth_frame(depth_raw, depth_bounds)
-                rgbd = merge_rgbd_frame(rgb, depth_u8)
+            if use_depth:
+                assert depth_gen is not None
+                stream = zip(rgb_gen, depth_gen)
+            else:
+                stream = ((rgb, None) for rgb in rgb_gen)
+
+            for rgb, depth_raw in stream:
+                if use_depth:
+                    assert depth_raw is not None
+                    depth_u8 = normalize_depth_frame(depth_raw, depth_bounds)
+                    obs = merge_rgbd_frame(rgb, depth_u8)
+                else:
+                    depth_u8 = None
+                    obs = rgb
 
                 if frame_idx in hands_by_frame:
                     latest_hands = hands_by_frame[frame_idx]
@@ -745,7 +763,7 @@ def process_split(
                 update_actions(action_state, right["landmarks"] if right else None)
                 action = encode_action(action_state)
 
-                chunk_rgbd.append(rgbd)
+                chunk_rgbd.append(obs)
                 chunk_actions.append(action)
                 if action_state.space_backfill_frames > 0:
                     apply_space_backfill(chunk_actions, action_state.space_backfill_frames)
@@ -767,12 +785,13 @@ def process_split(
                         prefix = f"{stem}_f{global_idx}"
                         rgb_lo = cv2.resize(sample_rgb, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
                         rgb_hi = cv2.resize(sample_rgb, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
-                        d_lo = cv2.resize(sample_depth_u8, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
-                        d_hi = cv2.resize(sample_depth_u8, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
                         cv2.imwrite(str(sample_dir / f"{prefix}_rgb_lo.png"), cv2.cvtColor(rgb_lo, cv2.COLOR_RGB2BGR))
                         cv2.imwrite(str(sample_dir / f"{prefix}_rgb_hi.png"), cv2.cvtColor(rgb_hi, cv2.COLOR_RGB2BGR))
-                        cv2.imwrite(str(sample_dir / f"{prefix}_depth_lo.png"), d_lo)
-                        cv2.imwrite(str(sample_dir / f"{prefix}_depth_hi.png"), d_hi)
+                        if sample_depth_u8 is not None:
+                            d_lo = cv2.resize(sample_depth_u8, (LOW_RES[1], LOW_RES[0]), interpolation=cv2.INTER_AREA)
+                            d_hi = cv2.resize(sample_depth_u8, (FULL_RES[1], FULL_RES[0]), interpolation=cv2.INTER_AREA)
+                            cv2.imwrite(str(sample_dir / f"{prefix}_depth_lo.png"), d_lo)
+                            cv2.imwrite(str(sample_dir / f"{prefix}_depth_hi.png"), d_hi)
                         with open(sample_dir / f"{prefix}_action.json", "w") as f:
                             json.dump({"frame": global_idx, "action": sample_action}, f, indent=2)
                         print(f"  Saved sample frame {global_idx} to {sample_dir}")
@@ -807,7 +826,8 @@ def process_split(
                     gc.collect()
         finally:
             rgb_gen.close()
-            depth_gen.close()
+            if depth_gen is not None:
+                depth_gen.close()
 
         tail = len(chunk_rgbd)
         total_frames = frame_idx
@@ -831,7 +851,7 @@ def process_split(
 
 def main() -> None:
     args = parse_args()
-    if args.depth_max_mm <= args.depth_min_mm:
+    if args.use_depth and args.depth_max_mm <= args.depth_min_mm:
         raise ValueError("--depth-max-mm must be greater than --depth-min-mm")
     depth_bounds = (float(args.depth_min_mm), float(args.depth_max_mm))
 
@@ -840,13 +860,16 @@ def main() -> None:
         shutil.rmtree(args.out_dir)
 
     print(f"Using raw data root: {args.raw_dir}")
-    print(f"Depth normalization: clip [{args.depth_min_mm}, {args.depth_max_mm}] mm -> uint8")
+    if args.use_depth:
+        print(f"Depth normalization: clip [{args.depth_min_mm}, {args.depth_max_mm}] mm -> uint8")
+    else:
+        print("Depth disabled: generating RGB-only processed data")
 
     for split in ("train", "test"):
         print(f"\n{'#'*60}")
         print(f"# Split: {split}")
         print(f"{'#'*60}")
-        process_split(split, args.raw_dir, args.out_dir, args.chunk_size, depth_bounds)
+        process_split(split, args.raw_dir, args.out_dir, args.chunk_size, depth_bounds, args.use_depth)
 
     print(f"\n{'='*60}")
     print(f"Dataset written to {args.out_dir}")

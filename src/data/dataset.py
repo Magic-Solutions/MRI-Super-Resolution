@@ -160,6 +160,11 @@ class CSGOHdf5Dataset(StateDictMixin, TorchDataset):
         super().__init__()
         filenames = sorted(Path(directory).rglob("*.hdf5"), key=lambda x: x.stem)
         self._filenames = {f"{x.parent.name}/{x.name}": x for x in filenames}
+        if filenames:
+            with h5py.File(filenames[0], "r") as f:
+                self.num_channels = int(np.asarray(f["frame_0_x"]).shape[2])
+        else:
+            self.num_channels = 0
         self._length_one_episode = 1000
         self.num_episodes = len(self._filenames)
         self.num_steps = self._length_one_episode * self.num_episodes

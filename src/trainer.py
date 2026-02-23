@@ -93,6 +93,21 @@ class Trainer(StateDictMixin):
             assert self._is_static_dataset
             num_actions = cfg.env.num_actions
             dataset_full_res = CSGOHdf5Dataset(Path(cfg.env.path_data_full_res))
+            expected_channels = int(cfg.agent.denoiser.inner_model.img_channels)
+            if dataset_full_res.num_channels != expected_channels:
+                raise ValueError(
+                    "Dataset/model channel mismatch: "
+                    f"full_res data has {dataset_full_res.num_channels} channels, "
+                    f"but cfg.agent.denoiser.inner_model.img_channels={expected_channels}. "
+                    "Regenerate processed data with matching --use-depth or update config use_depth."
+                )
+            if cfg.agent.upsampler is not None:
+                upsampler_channels = int(cfg.agent.upsampler.inner_model.img_channels)
+                if upsampler_channels != expected_channels:
+                    raise ValueError(
+                        "Inconsistent channel config: "
+                        f"denoiser expects {expected_channels} channels but upsampler expects {upsampler_channels}."
+                    )
         
         # Envs (atari only)
         else:
