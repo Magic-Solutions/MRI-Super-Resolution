@@ -21,6 +21,7 @@ DEPTH_MIN_MM="${DEPTH_MIN_MM:-200}"
 DEPTH_MAX_MM="${DEPTH_MAX_MM:-3000}"
 TRAIN_OVERRIDES="${TRAIN_OVERRIDES:-}"
 GCP_PROJECT="${GCP_PROJECT:-}"
+CKPT_UPLOAD_POLL_SECONDS="${CKPT_UPLOAD_POLL_SECONDS:-30}"
 
 WORK_ROOT="${WORK_ROOT:-/tmp/diamond_vertex}"
 RAW_DIR="${WORK_ROOT}/raw_data"
@@ -101,6 +102,45 @@ cat > "${RUN_DIR}/run_metadata.json" <<EOF
 EOF
 
 echo "Starting training run ${RUN_NAME}"
+CHECKPOINTS_DIR="${HYDRA_RUN_DIR}/checkpoints"
+CHECKPOINTS_DST_PREFIX="${OUTPUT_URI}/training_run/hydra/${RUN_NAME}/checkpoints"
+LAST_CKPT_SNAPSHOT=""
+
+compute_checkpoint_snapshot() {
+  local ckpt_dir="$1"
+  python - "$ckpt_dir" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+ckpt_dir = Path(sys.argv[1])
+if not ckpt_dir.exists():
+    print("missing")
+    raise SystemExit(0)
+
+entries = []
+for p in sorted(ckpt_dir.rglob("*")):
+    if p.is_file():
+        st = p.stat()
+        rel = p.relative_to(ckpt_dir)
+        entries.append(f"{rel}:{st.st_size}:{st.st_mtime_ns}")
+payload = "\n".join(entries).encode("utf-8")
+print(hashlib.sha1(payload).hexdigest())
+PY
+}
+
+sync_checkpoints_if_changed() {
+  local snap
+  snap="$(compute_checkpoint_snapshot "${CHECKPOINTS_DIR}")"
+  if [[ "${snap}" != "${LAST_CKPT_SNAPSHOT}" ]]; then
+    if [[ "${snap}" != "missing" ]]; then
+      echo "Checkpoint change detected; uploading ${CHECKPOINTS_DIR} -> ${CHECKPOINTS_DST_PREFIX}"
+      python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${CHECKPOINTS_DIR}" --dst-prefix "${CHECKPOINTS_DST_PREFIX}"
+    fi
+    LAST_CKPT_SNAPSHOT="${snap}"
+  fi
+}
+
 python src/main.py \
   --config-name "${CONFIG_NAME}" \
   "use_depth=${USE_DEPTH,,}" \
@@ -108,7 +148,16 @@ python src/main.py \
   "env.path_data_full_res=${PROCESSED_DIR}/full_res" \
   "wandb.name=${RUN_NAME}" \
   "hydra.run.dir=${HYDRA_RUN_DIR}" \
-  ${TRAIN_OVERRIDES}
+  ${TRAIN_OVERRIDES} &
+TRAIN_PID=$!
+
+while kill -0 "${TRAIN_PID}" 2>/dev/null; do
+  sync_checkpoints_if_changed
+  sleep "${CKPT_UPLOAD_POLL_SECONDS}"
+done
+
+wait "${TRAIN_PID}"
+sync_checkpoints_if_changed
 
 echo "Uploading run outputs to ${OUTPUT_URI}"
 python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${RUN_DIR}" --dst-prefix "${OUTPUT_URI}/training_run"

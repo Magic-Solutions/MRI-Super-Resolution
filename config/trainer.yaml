@@ -18,6 +18,7 @@ wandb:
   group: null
   tags: null
   notes: null
+  heartbeat_interval_seconds: 60
 
 initialization:
   path_to_ckpt: null

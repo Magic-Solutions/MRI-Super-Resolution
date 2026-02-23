@@ -55,10 +55,21 @@ class Trainer(StateDictMixin):
         if self._use_cuda:
             torch.cuda.set_device(self._rank)  # fix compilation error on multi-gpu nodes
 
+        self._wandb_heartbeat_interval_s = int(getattr(cfg.wandb, "heartbeat_interval_seconds", 60))
+
         # Init wandb
         if self._rank == 0:
+            wandb_init_kwargs = OmegaConf.to_container(cfg.wandb, resolve=True)
+            assert isinstance(wandb_init_kwargs, dict)
+            wandb_init_kwargs.pop("heartbeat_interval_seconds", None)
             try_until_no_except(
-                partial(wandb.init, config=OmegaConf.to_container(cfg, resolve=True), reinit=True, resume=True, **cfg.wandb)
+                partial(
+                    wandb.init,
+                    config=OmegaConf.to_container(cfg, resolve=True),
+                    reinit=True,
+                    resume=True,
+                    **wandb_init_kwargs,
+                )
             )
 
         # Flags
@@ -409,6 +420,9 @@ class Trainer(StateDictMixin):
         opt.zero_grad()
         data_iterator = iter(data_loader) if data_loader is not None else None
         to_log = []
+        train_start = time.time()
+        next_wandb_heartbeat = train_start + self._wandb_heartbeat_interval_s
+        num_optimizer_updates = 0
 
         num_steps = cfg.grad_acc_steps * steps
 
@@ -428,10 +442,24 @@ class Trainer(StateDictMixin):
 
                 opt.step()
                 opt.zero_grad()
+                num_optimizer_updates += 1
 
                 if lr_sched is not None:
                     metrics["lr"] = lr_sched.get_last_lr()[0]
                     lr_sched.step()
+
+                if self._rank == 0 and self._wandb_heartbeat_interval_s > 0:
+                    now = time.time()
+                    if now >= next_wandb_heartbeat:
+                        wandb.log(
+                            {
+                                "epoch": self.epoch,
+                                f"{name}/train/progress": (i + 1) / max(num_steps, 1),
+                                f"{name}/train/optimizer_updates": num_optimizer_updates,
+                                f"{name}/train/elapsed_minutes": (now - train_start) / 60.0,
+                            }
+                        )
+                        next_wandb_heartbeat = now + self._wandb_heartbeat_interval_s
 
             to_log.append(metrics)
 
