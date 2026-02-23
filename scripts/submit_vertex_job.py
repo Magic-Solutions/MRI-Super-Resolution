@@ -75,8 +75,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument(
         "--use-depth",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
         help="Enable depth channel preprocessing/training for this run",
     )
     parser.add_argument("--depth-min-mm", type=int, default=200)

@@ -101,13 +101,6 @@ def draw_hud(frame: np.ndarray, state: pipeline.ActionState) -> None:
         cv2.line(frame, (ix, iy - size), (ix, iy + size), (0, 255, 255), 2, cv2.LINE_AA)
 
 
-def apply_space_backfill(records: list[dict], backfill_frames: int) -> None:
-    if backfill_frames <= 0:
-        return
-    for i in range(1, min(backfill_frames, len(records) - 1) + 1):
-        records[-1 - i]["action"][4] = 1.0
-
-
 def main() -> None:
     args = parse_args()
     hands_by_frame = pipeline.extract_hand_landmarks(args.mkv)
@@ -144,9 +137,6 @@ def main() -> None:
                 "f": frame_idx,
                 "action": pipeline.encode_action(state),
             })
-            if state.space_backfill_frames > 0:
-                apply_space_backfill(action_records, state.space_backfill_frames)
-                state.space_backfill_frames = 0
 
             draw_hud(frame, state)
 

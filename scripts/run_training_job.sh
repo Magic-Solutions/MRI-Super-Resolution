@@ -15,7 +15,7 @@ cd "${ROOT_DIR}"
 
 RUN_NAME="${RUN_NAME:-vertex-run-$(date +%Y%m%d-%H%M%S)}"
 CONFIG_NAME="${CONFIG_NAME:-trainer}"
-USE_DEPTH="${USE_DEPTH:-true}"
+USE_DEPTH="${USE_DEPTH:-false}"
 CHUNK_SIZE="${CHUNK_SIZE:-1000}"
 DEPTH_MIN_MM="${DEPTH_MIN_MM:-200}"
 DEPTH_MAX_MM="${DEPTH_MAX_MM:-3000}"
@@ -82,8 +82,6 @@ PREPROCESS_ARGS=(
 )
 if [[ "${USE_DEPTH,,}" == "true" ]]; then
   PREPROCESS_ARGS+=(--use-depth --depth-min-mm "${DEPTH_MIN_MM}" --depth-max-mm "${DEPTH_MAX_MM}")
-else
-  PREPROCESS_ARGS+=(--no-use-depth)
 fi
 python src/raw_data/scripts/main.py "${PREPROCESS_ARGS[@]}"
 

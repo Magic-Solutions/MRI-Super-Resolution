@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true", help="Turn on model compilation.")
     parser.add_argument("--fps", type=int, default=15, help="Frame rate.")
     parser.add_argument("--no-header", action="store_true")
+    parser.add_argument(
+        "--use-depth",
+        action="store_true",
+        default=None,
+        help="Override config depth mode for local checkpoints (default: use config value).",
+    )
     parser.add_argument("--local-ckpt", type=str, default=None, help="Path to local agent checkpoint.")
     parser.add_argument("--spawn-dir", type=str, default=None, help="Path to spawn directory.")
     return parser.parse_args()
@@ -100,6 +106,8 @@ def main():
 
     with initialize(version_base="1.3", config_path="../config"):
         cfg = compose(config_name="trainer")
+    if args.use_depth is not None:
+        cfg.use_depth = bool(args.use_depth)
 
     # window size
     h, w = (cfg.env.train.size,) * 2 if isinstance(cfg.env.train.size, int) else cfg.env.train.size

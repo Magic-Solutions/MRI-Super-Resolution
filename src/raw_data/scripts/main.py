@@ -72,8 +72,6 @@ HOLD_ON_THRESHOLD = 0.35
 HOLD_OFF_THRESHOLD = 0.16
 HOLD_ON_FRAMES = 3
 HOLD_OFF_FRAMES = 5
-SPACE_PULSE_FRAMES = 5
-SPACE_EXTRA_BACKFILL_FRAMES = 5
 PINCH_REF = 0.75
 CURL_REF = 1.15
 
@@ -99,8 +97,6 @@ class ActionState:
     is_holding: bool = False
     hold_on_count: int = 0
     hold_off_count: int = 0
-    space_pulse_remaining: int = 0
-    space_backfill_frames: int = 0
 
 
 def get_right_hand(hands: list) -> dict | None:
@@ -188,8 +184,6 @@ def update_actions(state: ActionState, landmarks: list | None) -> None:
         state.is_holding = False
         state.hold_on_count = 0
         state.hold_off_count = 0
-        state.space_pulse_remaining = 0
-        state.space_backfill_frames = 0
         state.grip = False
         state.moving = False
         state.left = state.right = state.up = state.down = False
@@ -205,26 +199,15 @@ def update_actions(state: ActionState, landmarks: list | None) -> None:
         if state.hold_on_count >= HOLD_ON_FRAMES:
             state.is_holding = True
             state.hold_on_count = 0
-            state.space_pulse_remaining = max(state.space_pulse_remaining, SPACE_PULSE_FRAMES)
-            state.space_backfill_frames = max(
-                state.space_backfill_frames,
-                (HOLD_ON_FRAMES - 1) + SPACE_EXTRA_BACKFILL_FRAMES,
-            )
     else:
         state.hold_off_count = state.hold_off_count + 1 if state.hold_score <= HOLD_OFF_THRESHOLD else 0
         state.hold_on_count = 0
         if state.hold_off_count >= HOLD_OFF_FRAMES:
             state.is_holding = False
             state.hold_off_count = 0
-            state.space_pulse_remaining = max(state.space_pulse_remaining, SPACE_PULSE_FRAMES)
-            state.space_backfill_frames = max(
-                state.space_backfill_frames,
-                (HOLD_OFF_FRAMES - 1) + SPACE_EXTRA_BACKFILL_FRAMES,
-            )
 
-    state.grip = state.space_pulse_remaining > 0
-    if state.space_pulse_remaining > 0:
-        state.space_pulse_remaining -= 1
+    # Keep jump (space) held continuously while the hand is considered closed.
+    state.grip = state.is_holding
 
     x, y = get_tracking_point(landmarks)
     if state.prev_x is not None:
@@ -264,13 +247,6 @@ def encode_action(state: ActionState) -> list[float]:
     vec[N_KEYS + N_CLICKS + MOUSE_X_ZERO_IDX] = 1.0
     vec[N_KEYS + N_CLICKS + N_MOUSE_X + MOUSE_Y_ZERO_IDX] = 1.0
     return vec
-
-
-def apply_space_backfill(actions: list[list[float]], backfill_frames: int) -> None:
-    if backfill_frames <= 0:
-        return
-    for i in range(1, min(backfill_frames, len(actions) - 1) + 1):
-        actions[-1 - i][4] = 1.0
 
 
 def extract_hand_landmarks(mkv_path: Path) -> dict[int, list]:
@@ -366,9 +342,6 @@ def infer_actions(hands_by_frame: dict[int, list], n_frames: int) -> list[list[f
         right = get_right_hand(hands)
         update_actions(state, right["landmarks"] if right else None)
         actions.append(encode_action(state))
-        if state.space_backfill_frames > 0:
-            apply_space_backfill(actions, state.space_backfill_frames)
-            state.space_backfill_frames = 0
     return actions
 
 
@@ -678,9 +651,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--use-depth",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Include depth channel in processed data (default: true)",
+        action="store_true",
+        default=False,
+        help="Include depth channel in processed data (default: false)",
     )
     return parser.parse_args()
 
@@ -765,9 +738,6 @@ def process_split(
 
                 chunk_rgbd.append(obs)
                 chunk_actions.append(action)
-                if action_state.space_backfill_frames > 0:
-                    apply_space_backfill(chunk_actions, action_state.space_backfill_frames)
-                    action_state.space_backfill_frames = 0
 
                 local_idx = len(chunk_rgbd) - 1
                 if not sample_saved and local_idx == sample_local_idx:

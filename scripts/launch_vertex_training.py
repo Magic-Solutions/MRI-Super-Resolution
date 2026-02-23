@@ -190,8 +190,6 @@ def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir:
                 str(args.depth_max_mm),
             ]
         )
-    else:
-        preprocess_cmd.append("--no-use-depth")
     subprocess.run(
         preprocess_cmd,
         check=True,
@@ -390,8 +388,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-output", type=Path, default=Path("training_preview.mp4"))
     parser.add_argument(
         "--use-depth",
-        action=argparse.BooleanOptionalAction,
-        default=True,
+        action="store_true",
+        default=False,
         help="Enable depth channel preprocessing/training for this run",
     )
     parser.add_argument("--depth-min-mm", type=int, default=200)
@@ -558,7 +556,6 @@ def main() -> None:
             str(args.boot_disk_size_gb),
             "--chunk-size",
             str(args.chunk_size),
-            "--use-depth" if args.use_depth else "--no-use-depth",
             "--depth-min-mm",
             str(args.depth_min_mm),
             "--depth-max-mm",
@@ -566,6 +563,8 @@ def main() -> None:
             "--train-overrides",
             train_overrides,
         ]
+        if args.use_depth:
+            submit_cmd.append("--use-depth")
         if args.dry_run:
             submit_cmd.append("--dry-run")
         subprocess.run(submit_cmd, check=True)

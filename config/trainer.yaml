@@ -4,7 +4,7 @@ defaults:
   - agent: csgo
   - world_model_env: fast
 
-use_depth: true
+use_depth: false
 
 hydra:
   job:
