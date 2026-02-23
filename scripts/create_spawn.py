@@ -4,14 +4,15 @@ Usage:
     python scripts/create_spawn.py --hdf5-dir src/processed_data_omgrab/full_res/train
 
 This generates one spawn directory per HDF5 file, each containing:
-    low_res.npy   (num_conditioning, 4, 30, 56) uint8
-    full_res.npy  (num_conditioning, 4, 150, 280) uint8
+    low_res.npy   (num_conditioning, C, 30, 56) uint8
+    full_res.npy  (num_conditioning, C, 150, 280) uint8
     act.npy       (num_conditioning, 51) float
     next_act.npy  (1, 51) float
+
+Where C is 4 for RGBD runs and 3 for RGB-only runs.
 """
 
 import argparse
-import os
 from pathlib import Path
 
 import h5py
@@ -41,7 +42,7 @@ def create_spawn_from_hdf5(
             full_res_frames.append(frame)
 
             img = Image.fromarray(frame.permute(1, 2, 0).numpy())
-            low = torch.tensor(np.array(img.resize(LOW_RES_SIZE, Image.BICUBIC))).permute(2, 0, 1)
+            low = torch.tensor(np.array(img.resize(LOW_RES_SIZE, Image.Resampling.BICUBIC))).permute(2, 0, 1)
             low_res_frames.append(low)
 
             acts.append(torch.tensor(f[f"frame_{i}_y"][:]))
@@ -75,10 +76,9 @@ def main():
         create_spawn_from_hdf5(hdf5_path, spawn_dir, args.num_conditioning, args.start_frame)
         print(f"[{idx}] {hdf5_path.name} -> {spawn_dir}")
 
-        with h5py.File(hdf5_path, "r") as f:
-            fr = np.load(spawn_dir / "full_res.npy")
-            lr = np.load(spawn_dir / "low_res.npy")
-            print(f"    full_res: {fr.shape} {fr.dtype}, low_res: {lr.shape} {lr.dtype}")
+        fr = np.load(spawn_dir / "full_res.npy")
+        lr = np.load(spawn_dir / "low_res.npy")
+        print(f"    full_res: {fr.shape} {fr.dtype}, low_res: {lr.shape} {lr.dtype}")
 
     print(f"\nCreated {len(hdf5_files)} spawn(s) in {output_root}/")
 

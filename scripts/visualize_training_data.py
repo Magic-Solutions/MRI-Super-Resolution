@@ -1,8 +1,8 @@
-"""Visualize training data: RGB + depth side-by-side with action HUD overlay.
+"""Visualize training data: RGB (+ optional depth) with action HUD overlay.
 
 Reads full_res HDF5 files and renders a video showing:
-  - Left: RGB frame with arrow keys + spacebar overlay
-  - Right: Depth channel (inferno colormap)
+  - RGB frame with arrow keys + spacebar overlay
+  - Optional depth panel (inferno colormap) when a depth channel is present
 
 Hand landmarks are NOT stored in HDF5 (only used during preprocessing),
 so they cannot be overlaid here.
@@ -114,6 +114,9 @@ def main() -> None:
         print(f"No HDF5 files in {data_dir}")
         return
     hdf5_files = select_evenly_spaced_files(all_hdf5_files, args.num_chunks)
+    with h5py.File(hdf5_files[0], "r") as f0:
+        first = np.asarray(f0["frame_0_x"])
+        has_depth = bool(first.shape[2] >= 4)
 
     total_frames = args.num_seconds * args.fps
     print(
@@ -125,7 +128,7 @@ def main() -> None:
     scale = args.scale
     disp_h, disp_w = orig_h * scale, orig_w * scale
     gap = 4
-    canvas_w = disp_w * 2 + gap
+    canvas_w = disp_w * 2 + gap if has_depth else disp_w
     canvas_h = disp_h
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -153,23 +156,29 @@ def main() -> None:
             if frame_count >= total_frames or written_chunk >= chunk_budget:
                 break
 
-            rgbd = f[f"frame_{i}_x"][:]  # (150, 280, 4) uint8
+            rgbd = np.asarray(f[f"frame_{i}_x"])  # (150, 280, C) uint8
             act = f[f"frame_{i}_y"][:]   # (51,) float64
 
             rgb = rgbd[:, :, :3]
-            depth = rgbd[:, :, 3]
+            depth = rgbd[:, :, 3] if has_depth and rgbd.shape[2] >= 4 else None
 
-            # Detect depth freeze
-            if prev_depth is not None and np.array_equal(depth, prev_depth):
-                depth_frozen = True
+            if has_depth and depth is not None:
+                # Detect depth freeze
+                if prev_depth is not None and np.array_equal(depth, prev_depth):
+                    depth_frozen = True
+                else:
+                    depth_frozen = False
+                prev_depth = depth.copy()
             else:
                 depth_frozen = False
-            prev_depth = depth.copy()
 
             # Upscale
             rgb_up = cv2.resize(rgb, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
-            depth_up = cv2.resize(depth, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
-            depth_color = cv2.applyColorMap(depth_up, cv2.COLORMAP_INFERNO)
+            if has_depth and depth is not None:
+                depth_up = cv2.resize(depth, (disp_w, disp_h), interpolation=cv2.INTER_NEAREST)
+                depth_color = cv2.applyColorMap(depth_up, cv2.COLORMAP_INFERNO)
+            else:
+                depth_color = None
 
             # Convert RGB to BGR for OpenCV
             rgb_bgr = cv2.cvtColor(rgb_up, cv2.COLOR_RGB2BGR)
@@ -185,14 +194,16 @@ def main() -> None:
             # Labels
             cv2.putText(rgb_bgr, "RGB", (disp_w - 50, 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-            label_color = (0, 0, 255) if depth_frozen else (255, 255, 255)
-            cv2.putText(depth_color, "DEPTH", (disp_w - 80, 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
+            if depth_color is not None:
+                label_color = (0, 0, 255) if depth_frozen else (255, 255, 255)
+                cv2.putText(depth_color, "DEPTH", (disp_w - 80, 20),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, label_color, 1, cv2.LINE_AA)
 
             # Compose canvas
             canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
             canvas[:, :disp_w] = rgb_bgr
-            canvas[:, disp_w + gap:] = depth_color
+            if depth_color is not None:
+                canvas[:, disp_w + gap:] = depth_color
 
             writer.write(canvas)
             frame_count += 1
@@ -201,7 +212,7 @@ def main() -> None:
         f.close()
         print(
             f"  {hdf5_path.name}: wrote {written_chunk}/{chunk_budget} frames, "
-            f"depth froze={depth_frozen} (total: {frame_count})"
+            f"depth froze={depth_frozen if has_depth else 'n/a'} (total: {frame_count})"
         )
 
     writer.release()

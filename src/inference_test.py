@@ -1,4 +1,4 @@
-"""Headless inference test for diamond-depth: generates RGBD frames and saves RGB + depth."""
+"""Headless inference test: saves RGB (+ optional depth visualization)."""
 
 from pathlib import Path
 
@@ -22,20 +22,23 @@ OUT_DIR = Path("inference_frames")
 NUM_STEPS = 20
 
 
-def save_rgbd(obs: torch.Tensor, path_prefix: str) -> None:
-    """Save a 4-channel RGBD observation as separate RGB and depth images."""
+def save_obs(obs: torch.Tensor, path_prefix: str) -> None:
+    """Save RGB observation and optional depth visualizations."""
     t = obs.add(1).div(2).mul(255).clamp(0, 255).byte().cpu()
 
     rgb = t[:3].permute(1, 2, 0).numpy()
     Image.fromarray(rgb).save(f"{path_prefix}_rgb.png")
 
-    depth = t[3].numpy()
-    Image.fromarray(depth).save(f"{path_prefix}_depth.png")
-
-    side_by_side = np.zeros((rgb.shape[0], rgb.shape[1] * 2, 3), dtype=np.uint8)
-    side_by_side[:, :rgb.shape[1]] = rgb
-    depth_colored = colorize_inverse_depth_uint8(depth)
-    side_by_side[:, rgb.shape[1]:] = depth_colored
+    has_depth = t.size(0) >= 4
+    if has_depth:
+        depth = t[3].numpy()
+        Image.fromarray(depth).save(f"{path_prefix}_depth.png")
+        side_by_side = np.zeros((rgb.shape[0], rgb.shape[1] * 2, 3), dtype=np.uint8)
+        side_by_side[:, :rgb.shape[1]] = rgb
+        depth_colored = colorize_inverse_depth_uint8(depth)
+        side_by_side[:, rgb.shape[1]:] = depth_colored
+    else:
+        side_by_side = rgb
     Image.fromarray(side_by_side).save(f"{path_prefix}_sidebyside.png")
 
 
@@ -67,8 +70,8 @@ def main():
     obs, info = wm_env.reset()
     print(f"Reset done. obs shape: {obs.shape}, range: [{obs.min():.2f}, {obs.max():.2f}]")
 
-    save_rgbd(obs[0], str(OUT_DIR / "frame_000_reset"))
-    print("Saved frame_000_reset (rgb + depth + sidebyside)")
+    save_obs(obs[0], str(OUT_DIR / "frame_000_reset"))
+    print("Saved frame_000_reset outputs")
 
     idle_action = CSGOAction([], 0, 0, False, False)
     act_tensor = encode_csgo_action(idle_action, device)
@@ -77,7 +80,7 @@ def main():
         next_obs, rew, end, trunc, info = wm_env.step(act_tensor)
         print(f"Step {step+1:3d}: obs shape {next_obs.shape}, range [{next_obs.min():.2f}, {next_obs.max():.2f}]")
 
-        save_rgbd(next_obs[0], str(OUT_DIR / f"frame_{step+1:03d}"))
+        save_obs(next_obs[0], str(OUT_DIR / f"frame_{step+1:03d}"))
 
         if end or trunc:
             print("Episode ended, resetting")
@@ -85,7 +88,7 @@ def main():
         else:
             obs = next_obs
 
-    print(f"\nDone! {NUM_STEPS} frames saved to {OUT_DIR}/ (rgb, depth, sidebyside)")
+    print(f"\nDone! {NUM_STEPS} frames saved to {OUT_DIR}/")
 
 
 if __name__ == "__main__":
