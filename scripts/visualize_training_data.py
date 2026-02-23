@@ -39,6 +39,15 @@ def decode_action(act: np.ndarray) -> dict:
     }
 
 
+def select_evenly_spaced_files(files: list[Path], count: int) -> list[Path]:
+    if count <= 0:
+        return []
+    if len(files) <= count:
+        return files
+    idxs = np.linspace(0, len(files) - 1, num=count, dtype=int).tolist()
+    return [files[i] for i in idxs]
+
+
 def draw_key(frame: np.ndarray, cx: int, cy: int, w: int, h: int, active: bool, label: str) -> None:
     color_bg = (0, 200, 80) if active else (60, 60, 60)
     color_border = (100, 255, 130) if active else (140, 140, 140)
@@ -91,16 +100,26 @@ def main() -> None:
     parser.add_argument("--out", type=str, default="training_viz.mp4")
     parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
     parser.add_argument("--scale", type=int, default=3, help="Upscale factor for display")
+    parser.add_argument(
+        "--num-chunks",
+        type=int,
+        default=1,
+        help="Render from this many evenly spaced HDF5 chunks (default: 1)",
+    )
     args = parser.parse_args()
 
     data_dir = Path(args.data_dir)
-    hdf5_files = sorted(data_dir.glob("*.hdf5"))
-    if not hdf5_files:
+    all_hdf5_files = sorted(data_dir.glob("*.hdf5"))
+    if not all_hdf5_files:
         print(f"No HDF5 files in {data_dir}")
         return
+    hdf5_files = select_evenly_spaced_files(all_hdf5_files, args.num_chunks)
 
     total_frames = args.num_seconds * args.fps
-    print(f"Rendering {total_frames} frames ({args.num_seconds}s @ {args.fps}fps)")
+    print(
+        f"Rendering {total_frames} frames across {len(hdf5_files)} chunk(s) "
+        f"({args.num_seconds}s @ {args.fps}fps)"
+    )
 
     orig_h, orig_w = 150, 280
     scale = args.scale
@@ -113,9 +132,15 @@ def main() -> None:
     writer = cv2.VideoWriter(args.out, fourcc, args.fps, (canvas_w, canvas_h))
 
     frame_count = 0
-    for hdf5_path in hdf5_files:
+    base = total_frames // len(hdf5_files)
+    rem = total_frames % len(hdf5_files)
+
+    for chunk_idx, hdf5_path in enumerate(hdf5_files):
         if frame_count >= total_frames:
             break
+        chunk_budget = base + (1 if chunk_idx < rem else 0)
+        if chunk_budget <= 0:
+            continue
 
         f = h5py.File(hdf5_path, "r")
         n_frames = len([k for k in f.keys() if k.endswith("_x")])
@@ -123,8 +148,9 @@ def main() -> None:
         prev_depth = None
         depth_frozen = False
 
+        written_chunk = 0
         for i in range(n_frames):
-            if frame_count >= total_frames:
+            if frame_count >= total_frames or written_chunk >= chunk_budget:
                 break
 
             rgbd = f[f"frame_{i}_x"][:]  # (150, 280, 4) uint8
@@ -170,9 +196,13 @@ def main() -> None:
 
             writer.write(canvas)
             frame_count += 1
+            written_chunk += 1
 
         f.close()
-        print(f"  {hdf5_path.name}: {n_frames} frames, depth froze={depth_frozen} (total: {frame_count})")
+        print(
+            f"  {hdf5_path.name}: wrote {written_chunk}/{chunk_budget} frames, "
+            f"depth froze={depth_frozen} (total: {frame_count})"
+        )
 
     writer.release()
     print(f"Saved {frame_count} frames to {args.out}")

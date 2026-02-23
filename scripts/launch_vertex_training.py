@@ -199,6 +199,8 @@ def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir:
             str(args.preview_seconds),
             "--fps",
             str(args.preview_fps),
+            "--num-chunks",
+            str(args.preview_num_chunks),
             "--data-dir",
             str(preview_data_dir),
             "--out",
@@ -366,6 +368,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prefix", action="append", default=[], help="GCS prefix URI to include recursively")
     parser.add_argument("--preview-sample-count", type=int, default=2)
     parser.add_argument("--preview-chunk-size", type=int, default=200)
+    parser.add_argument(
+        "--preview-num-chunks",
+        type=int,
+        default=5,
+        help="Render this many evenly spaced preview chunks (or fewer if unavailable)",
+    )
     parser.add_argument("--preview-seconds", type=int, default=8)
     parser.add_argument("--preview-fps", type=int, default=15)
     parser.add_argument("--preview-output", type=Path, default=Path("training_preview.mp4"))
