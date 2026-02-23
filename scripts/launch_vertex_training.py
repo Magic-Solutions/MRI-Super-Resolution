@@ -383,7 +383,12 @@ def parse_args() -> argparse.Namespace:
         default=5,
         help="Render this many evenly spaced preview chunks (or fewer if unavailable)",
     )
-    parser.add_argument("--preview-seconds", type=int, default=8)
+    parser.add_argument(
+        "--preview-seconds",
+        type=int,
+        default=32,
+        help="Total preview duration in seconds (default: 32, ~4x longer than before)",
+    )
     parser.add_argument("--preview-fps", type=int, default=15)
     parser.add_argument("--preview-output", type=Path, default=Path("training_preview.mp4"))
     parser.add_argument(
