@@ -19,7 +19,7 @@ import json
 import random
 import subprocess
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 import argparse
 import shutil
@@ -52,6 +52,7 @@ HELPER_DIM = 2
 
 # MediaPipe hand landmark indices
 WRIST = 0
+THUMB_TIP = 4
 INDEX_MCP = 5
 MIDDLE_MCP = 9
 RING_MCP = 13
@@ -61,12 +62,20 @@ MIDDLE_TIP = 12
 RING_TIP = 16
 PINKY_TIP = 20
 
-GRIP_THRESHOLD = 1.1
 VELOCITY_EMA_ALPHA = 0.65
 VELOCITY_GAIN = 1.5
 SPEED_ON_THRESHOLD = 0.005
 SPEED_OFF_THRESHOLD = 0.0035
 DIAGONAL_RATIO_THRESHOLD = 0.35
+HOLD_SCORE_EMA_ALPHA = 0.85
+HOLD_ON_THRESHOLD = 0.35
+HOLD_OFF_THRESHOLD = 0.16
+HOLD_ON_FRAMES = 3
+HOLD_OFF_FRAMES = 5
+SPACE_PULSE_FRAMES = 5
+SPACE_EXTRA_BACKFILL_FRAMES = 5
+PINCH_REF = 0.75
+CURL_REF = 1.15
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +95,12 @@ class ActionState:
     grip: bool = False
     moving: bool = False
     ema_samples: int = 0
+    hold_score: float = 0.0
+    is_holding: bool = False
+    hold_on_count: int = 0
+    hold_off_count: int = 0
+    space_pulse_remaining: int = 0
+    space_backfill_frames: int = 0
 
 
 def get_right_hand(hands: list) -> dict | None:
@@ -101,14 +116,25 @@ def get_right_hand(hands: list) -> dict | None:
     return max(hands, key=lambda h: float(h.get("score", 0.0)))
 
 
-def detect_grip(landmarks: list) -> bool:
+def compute_hold_score(landmarks: list) -> float:
     wrist = np.array(landmarks[WRIST][:2])
+    palm_ref = np.array(landmarks[MIDDLE_MCP][:2])
+    hand_size = float(np.linalg.norm(palm_ref - wrist))
+    if hand_size < 1e-6:
+        return 0.0
+
+    thumb_tip = np.array(landmarks[THUMB_TIP][:2])
+    index_tip = np.array(landmarks[INDEX_TIP][:2])
+    pinch = float(np.linalg.norm(thumb_tip - index_tip) / hand_size)
+    pinch_score = float(np.clip((PINCH_REF - pinch) / max(PINCH_REF, 1e-6), 0.0, 1.0))
+
     tips = [INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP]
     mcps = [INDEX_MCP, MIDDLE_MCP, RING_MCP, PINKY_MCP]
     tip_dists = [np.linalg.norm(np.array(landmarks[t][:2]) - wrist) for t in tips]
     mcp_dists = [np.linalg.norm(np.array(landmarks[m][:2]) - wrist) for m in mcps]
-    ratios = [td / md if md > 1e-6 else 2.0 for td, md in zip(tip_dists, mcp_dists)]
-    return np.mean(ratios) < GRIP_THRESHOLD
+    curl_ratio = float(np.mean([td / md if md > 1e-6 else 2.0 for td, md in zip(tip_dists, mcp_dists)]))
+    curl_score = float(np.clip((CURL_REF - curl_ratio) / max(CURL_REF, 1e-6), 0.0, 1.0))
+    return 0.9 * pinch_score + 0.1 * curl_score
 
 
 def get_tracking_point(landmarks: list) -> tuple[float, float]:
@@ -158,12 +184,48 @@ def update_actions(state: ActionState, landmarks: list | None) -> None:
         state.prev_x = state.prev_y = None
         state.smooth_dx = state.smooth_dy = 0.0
         state.ema_samples = 0
+        state.hold_score = 0.0
+        state.is_holding = False
+        state.hold_on_count = 0
+        state.hold_off_count = 0
+        state.space_pulse_remaining = 0
+        state.space_backfill_frames = 0
         state.grip = False
         state.moving = False
         state.left = state.right = state.up = state.down = False
         return
 
-    state.grip = detect_grip(landmarks)
+    raw_hold_score = compute_hold_score(landmarks)
+    state.hold_score = (
+        HOLD_SCORE_EMA_ALPHA * raw_hold_score + (1 - HOLD_SCORE_EMA_ALPHA) * state.hold_score
+    )
+    if not state.is_holding:
+        state.hold_on_count = state.hold_on_count + 1 if state.hold_score >= HOLD_ON_THRESHOLD else 0
+        state.hold_off_count = 0
+        if state.hold_on_count >= HOLD_ON_FRAMES:
+            state.is_holding = True
+            state.hold_on_count = 0
+            state.space_pulse_remaining = max(state.space_pulse_remaining, SPACE_PULSE_FRAMES)
+            state.space_backfill_frames = max(
+                state.space_backfill_frames,
+                (HOLD_ON_FRAMES - 1) + SPACE_EXTRA_BACKFILL_FRAMES,
+            )
+    else:
+        state.hold_off_count = state.hold_off_count + 1 if state.hold_score <= HOLD_OFF_THRESHOLD else 0
+        state.hold_on_count = 0
+        if state.hold_off_count >= HOLD_OFF_FRAMES:
+            state.is_holding = False
+            state.hold_off_count = 0
+            state.space_pulse_remaining = max(state.space_pulse_remaining, SPACE_PULSE_FRAMES)
+            state.space_backfill_frames = max(
+                state.space_backfill_frames,
+                (HOLD_OFF_FRAMES - 1) + SPACE_EXTRA_BACKFILL_FRAMES,
+            )
+
+    state.grip = state.space_pulse_remaining > 0
+    if state.space_pulse_remaining > 0:
+        state.space_pulse_remaining -= 1
+
     x, y = get_tracking_point(landmarks)
     if state.prev_x is not None:
         raw_dx = x - state.prev_x
@@ -202,6 +264,13 @@ def encode_action(state: ActionState) -> list[float]:
     vec[N_KEYS + N_CLICKS + MOUSE_X_ZERO_IDX] = 1.0
     vec[N_KEYS + N_CLICKS + N_MOUSE_X + MOUSE_Y_ZERO_IDX] = 1.0
     return vec
+
+
+def apply_space_backfill(actions: list[list[float]], backfill_frames: int) -> None:
+    if backfill_frames <= 0:
+        return
+    for i in range(1, min(backfill_frames, len(actions) - 1) + 1):
+        actions[-1 - i][4] = 1.0
 
 
 def extract_hand_landmarks(mkv_path: Path) -> dict[int, list]:
@@ -297,6 +366,9 @@ def infer_actions(hands_by_frame: dict[int, list], n_frames: int) -> list[list[f
         right = get_right_hand(hands)
         update_actions(state, right["landmarks"] if right else None)
         actions.append(encode_action(state))
+        if state.space_backfill_frames > 0:
+            apply_space_backfill(actions, state.space_backfill_frames)
+            state.space_backfill_frames = 0
     return actions
 
 
@@ -675,6 +747,9 @@ def process_split(
 
                 chunk_rgbd.append(rgbd)
                 chunk_actions.append(action)
+                if action_state.space_backfill_frames > 0:
+                    apply_space_backfill(chunk_actions, action_state.space_backfill_frames)
+                    action_state.space_backfill_frames = 0
 
                 local_idx = len(chunk_rgbd) - 1
                 if not sample_saved and local_idx == sample_local_idx:
