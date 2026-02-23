@@ -5,7 +5,7 @@ set -euo pipefail
 # - RECORDINGS_MANIFEST_URI: gs://.../recordings_manifest.txt
 # - OUTPUT_URI: gs://.../runs/<run_id>
 # Optional:
-# - RUN_NAME, CONFIG_NAME, CHUNK_SIZE, DEPTH_MIN_MM, DEPTH_MAX_MM, TRAIN_OVERRIDES
+# - RUN_NAME, CONFIG_NAME, USE_DEPTH, CHUNK_SIZE, DEPTH_MIN_MM, DEPTH_MAX_MM, TRAIN_OVERRIDES
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -15,6 +15,7 @@ cd "${ROOT_DIR}"
 
 RUN_NAME="${RUN_NAME:-vertex-run-$(date +%Y%m%d-%H%M%S)}"
 CONFIG_NAME="${CONFIG_NAME:-trainer}"
+USE_DEPTH="${USE_DEPTH:-true}"
 CHUNK_SIZE="${CHUNK_SIZE:-1000}"
 DEPTH_MIN_MM="${DEPTH_MIN_MM:-200}"
 DEPTH_MAX_MM="${DEPTH_MAX_MM:-3000}"
@@ -74,11 +75,17 @@ echo "Downloading recordings listed in manifest"
 python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" download-manifest --manifest "${MANIFEST_LOCAL}" --dest-raw-dir "${RAW_DIR}"
 
 echo "Preprocessing recordings"
-python src/raw_data/scripts/main.py "${PROCESSED_DIR}" \
-  --raw-dir "${RAW_DIR}" \
-  --chunk-size "${CHUNK_SIZE}" \
-  --depth-min-mm "${DEPTH_MIN_MM}" \
-  --depth-max-mm "${DEPTH_MAX_MM}"
+PREPROCESS_ARGS=(
+  "${PROCESSED_DIR}"
+  --raw-dir "${RAW_DIR}"
+  --chunk-size "${CHUNK_SIZE}"
+)
+if [[ "${USE_DEPTH,,}" == "true" ]]; then
+  PREPROCESS_ARGS+=(--use-depth --depth-min-mm "${DEPTH_MIN_MM}" --depth-max-mm "${DEPTH_MAX_MM}")
+else
+  PREPROCESS_ARGS+=(--no-use-depth)
+fi
+python src/raw_data/scripts/main.py "${PREPROCESS_ARGS[@]}"
 
 mkdir -p "${RUN_DIR}"
 HYDRA_RUN_DIR="${RUN_DIR}/hydra/${RUN_NAME}"
@@ -88,6 +95,7 @@ cat > "${RUN_DIR}/run_metadata.json" <<EOF
   "run_name": "${RUN_NAME}",
   "recordings_manifest_uri": "${RECORDINGS_MANIFEST_URI}",
   "output_uri": "${OUTPUT_URI}",
+  "use_depth": "${USE_DEPTH}",
   "chunk_size": ${CHUNK_SIZE},
   "depth_min_mm": ${DEPTH_MIN_MM},
   "depth_max_mm": ${DEPTH_MAX_MM}
@@ -97,6 +105,7 @@ EOF
 echo "Starting training run ${RUN_NAME}"
 python src/main.py \
   --config-name "${CONFIG_NAME}" \
+  "use_depth=${USE_DEPTH,,}" \
   "env.path_data_low_res=${PROCESSED_DIR}/low_res" \
   "env.path_data_full_res=${PROCESSED_DIR}/full_res" \
   "wandb.name=${RUN_NAME}" \

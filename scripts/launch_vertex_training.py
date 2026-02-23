@@ -171,20 +171,29 @@ def download_preview_sample(
 
 
 def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir: Path) -> None:
+    preprocess_cmd = [
+        sys.executable,
+        "src/raw_data/scripts/main.py",
+        str(processed_dir),
+        "--raw-dir",
+        str(raw_dir),
+        "--chunk-size",
+        str(args.preview_chunk_size),
+    ]
+    if args.use_depth:
+        preprocess_cmd.extend(
+            [
+                "--use-depth",
+                "--depth-min-mm",
+                str(args.depth_min_mm),
+                "--depth-max-mm",
+                str(args.depth_max_mm),
+            ]
+        )
+    else:
+        preprocess_cmd.append("--no-use-depth")
     subprocess.run(
-        [
-            sys.executable,
-            "src/raw_data/scripts/main.py",
-            str(processed_dir),
-            "--raw-dir",
-            str(raw_dir),
-            "--chunk-size",
-            str(args.preview_chunk_size),
-            "--depth-min-mm",
-            str(args.depth_min_mm),
-            "--depth-max-mm",
-            str(args.depth_max_mm),
-        ],
+        preprocess_cmd,
         check=True,
     )
     preview_data_dir = processed_dir / "full_res" / "train"
@@ -270,7 +279,8 @@ def print_submission_summary(
     )
     print(
         "Preprocess:      "
-        f"chunk_size={args.chunk_size}, depth_clip=[{args.depth_min_mm}, {args.depth_max_mm}]"
+        f"chunk_size={args.chunk_size}, use_depth={'yes' if args.use_depth else 'no'}, "
+        f"depth_clip=[{args.depth_min_mm}, {args.depth_max_mm}]"
     )
     print(f"Smoke test:      {'yes' if args.smoke_test else 'no'}")
     print(f"Train overrides: {train_overrides if train_overrides else '(none)'}")
@@ -302,6 +312,7 @@ def build_train_override_string(args: argparse.Namespace) -> str:
         overrides.append(f"upsampler.training.steps_first_epoch={args.upsampler_steps_per_epoch}")
     if args.train_overrides:
         overrides.extend(shlex.split(args.train_overrides))
+    overrides.append(f"use_depth={'true' if args.use_depth else 'false'}")
     return " ".join(overrides)
 
 
@@ -377,6 +388,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-seconds", type=int, default=8)
     parser.add_argument("--preview-fps", type=int, default=15)
     parser.add_argument("--preview-output", type=Path, default=Path("training_preview.mp4"))
+    parser.add_argument(
+        "--use-depth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable depth channel preprocessing/training for this run",
+    )
     parser.add_argument("--depth-min-mm", type=int, default=200)
     parser.add_argument("--depth-max-mm", type=int, default=3000)
     parser.add_argument("--chunk-size", type=int, default=1000)
@@ -541,6 +558,7 @@ def main() -> None:
             str(args.boot_disk_size_gb),
             "--chunk-size",
             str(args.chunk_size),
+            "--use-depth" if args.use_depth else "--no-use-depth",
             "--depth-min-mm",
             str(args.depth_min_mm),
             "--depth-max-mm",

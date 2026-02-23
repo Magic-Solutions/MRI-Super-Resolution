@@ -17,6 +17,7 @@ def build_job_config(args: argparse.Namespace) -> dict:
         {"name": "OUTPUT_URI", "value": args.output_uri},
         {"name": "RUN_NAME", "value": args.run_name},
         {"name": "CONFIG_NAME", "value": args.config_name},
+        {"name": "USE_DEPTH", "value": "true" if args.use_depth else "false"},
         {"name": "CHUNK_SIZE", "value": str(args.chunk_size)},
         {"name": "DEPTH_MIN_MM", "value": str(args.depth_min_mm)},
         {"name": "DEPTH_MAX_MM", "value": str(args.depth_max_mm)},
@@ -72,6 +73,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--boot-disk-type", default="pd-ssd")
     parser.add_argument("--boot-disk-size-gb", type=int, default=500)
     parser.add_argument("--chunk-size", type=int, default=1000)
+    parser.add_argument(
+        "--use-depth",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable depth channel preprocessing/training for this run",
+    )
     parser.add_argument("--depth-min-mm", type=int, default=200)
     parser.add_argument("--depth-max-mm", type=int, default=3000)
     parser.add_argument("--train-overrides", default="")
