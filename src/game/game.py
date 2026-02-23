@@ -1,5 +1,6 @@
 from typing import Tuple, Union
 
+import cv2
 import numpy as np
 import pygame
 from PIL import Image
@@ -75,10 +76,12 @@ class Game:
                 x_rgb = x_center - self.width - gap // 2
                 screen.blit(surface, (x_rgb, y_center - self.height // 2))
 
-                depth = obs[0, 3:4].expand(3, -1, -1)
-                depth_np = depth.add(1).div(2).mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
-                depth_img = Image.fromarray(depth_np)
-                depth_pygame = np.array(depth_img.resize((self.width, self.height), resample=Image.BICUBIC)).transpose((1, 0, 2))
+                depth = obs[0, 3]
+                depth_u8 = depth.add(1).div(2).mul(255).clamp(0, 255).byte().cpu().numpy()
+                depth_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_INFERNO)
+                depth_rgb = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2RGB)
+                depth_img = Image.fromarray(depth_rgb)
+                depth_pygame = np.array(depth_img.resize((self.width, self.height), resample=Image.NEAREST)).transpose((1, 0, 2))
                 depth_surface = pygame.surfarray.make_surface(depth_pygame)
                 x_depth = x_center + gap // 2
                 screen.blit(depth_surface, (x_depth, y_center - self.height // 2))
