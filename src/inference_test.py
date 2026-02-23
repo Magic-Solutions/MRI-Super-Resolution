@@ -12,10 +12,11 @@ from PIL import Image
 from agent import Agent
 from envs import WorldModelEnv
 from csgo.action_processing import encode_csgo_action, CSGOAction
+from depth_viz import colorize_inverse_depth_uint8
 
 OmegaConf.register_new_resolver("eval", eval)
 
-CKPT = "outputs/2026-02-20/05-07-30/checkpoints/agent_versions/agent_epoch_00005.pt"
+CKPT = "/Users/isaac/Documents/omgrab/diamond/weights/diamond_runs_run-20260223-025709_training_run_hydra_run-20260223-025709_checkpoints_agent_versions_agent_epoch_00010.pt"
 SPAWN_DIR = "spawn"
 OUT_DIR = Path("inference_frames")
 NUM_STEPS = 20
@@ -33,7 +34,7 @@ def save_rgbd(obs: torch.Tensor, path_prefix: str) -> None:
 
     side_by_side = np.zeros((rgb.shape[0], rgb.shape[1] * 2, 3), dtype=np.uint8)
     side_by_side[:, :rgb.shape[1]] = rgb
-    depth_colored = np.stack([depth] * 3, axis=2)
+    depth_colored = colorize_inverse_depth_uint8(depth)
     side_by_side[:, rgb.shape[1]:] = depth_colored
     Image.fromarray(side_by_side).save(f"{path_prefix}_sidebyside.png")
 

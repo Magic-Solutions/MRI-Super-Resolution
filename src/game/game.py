@@ -1,11 +1,11 @@
 from typing import Tuple, Union
 
-import cv2
 import numpy as np
 import pygame
 from PIL import Image
 
 from csgo.action_processing import CSGOAction
+from depth_viz import colorize_inverse_depth_uint8
 from .dataset_env import DatasetEnv
 from .play_env import PlayEnv
 
@@ -78,8 +78,7 @@ class Game:
 
                 depth = obs[0, 3]
                 depth_u8 = depth.add(1).div(2).mul(255).clamp(0, 255).byte().cpu().numpy()
-                depth_bgr = cv2.applyColorMap(depth_u8, cv2.COLORMAP_INFERNO)
-                depth_rgb = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2RGB)
+                depth_rgb = colorize_inverse_depth_uint8(depth_u8)
                 depth_img = Image.fromarray(depth_rgb)
                 depth_pygame = np.array(depth_img.resize((self.width, self.height), resample=Image.NEAREST)).transpose((1, 0, 2))
                 depth_surface = pygame.surfarray.make_surface(depth_pygame)
