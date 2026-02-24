@@ -434,7 +434,7 @@ def parse_args() -> argparse.Namespace:
         help="Enable depth channel preprocessing/training for this run",
     )
     parser.add_argument("--depth-min-mm", type=int, default=200)
-    parser.add_argument("--depth-max-mm", type=int, default=2000)
+    parser.add_argument("--depth-max-mm", type=int, default=1500)
     parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument("--smoke-test", action="store_true", help="Use hydra config trainer_smoke")
     parser.add_argument("--epochs", type=int, default=None, help="Override training.num_final_epochs")

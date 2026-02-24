@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
         help="Enable depth channel preprocessing/training for this run",
     )
     parser.add_argument("--depth-min-mm", type=int, default=200)
-    parser.add_argument("--depth-max-mm", type=int, default=3000)
+    parser.add_argument("--depth-max-mm", type=int, default=1500)
     parser.add_argument("--train-overrides", default="")
     parser.add_argument("--wait-for-start", dest="wait_for_start", action="store_true", default=True, help="Wait and report until job enters RUNNING state")
     parser.add_argument("--no-wait-for-start", dest="wait_for_start", action="store_false", help="Return immediately after submission")
