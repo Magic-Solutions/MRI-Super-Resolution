@@ -10,17 +10,17 @@ denoiser:
     _target_: models.diffusion.InnerModelConfig
     img_channels: ${eval:'4 if ${use_depth} else 3'}
     num_steps_conditioning: 4
-    cond_channels: 1024
+    cond_channels: 2048
     depths:
     - 2
     - 2
     - 2
     - 2
     channels:
-    - 64
     - 128
     - 256
     - 512
+    - 1024
     attn_depths:
     - 0
     - 0
@@ -37,17 +37,17 @@ upsampler:
     _target_: models.diffusion.InnerModelConfig
     img_channels: ${eval:'4 if ${use_depth} else 3'}
     num_steps_conditioning: 1
-    cond_channels: 1024
+    cond_channels: 2048
     depths:
     - 2
     - 2
     - 2
     - 2
     channels:
-    - 32
-    - 32
+    - 64
     - 64
     - 128
+    - 256
     attn_depths:
     - 0
     - 0
