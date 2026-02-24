@@ -170,7 +170,7 @@ def download_preview_sample(
         download_blob_with_progress(client.bucket(bucket_name).blob(blob_name), out_path)
 
 
-def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir: Path) -> None:
+def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir: Path) -> Path | None:
     preprocess_cmd = [
         sys.executable,
         "src/raw_data/scripts/main.py",
@@ -215,18 +215,48 @@ def run_preview_pipeline(args: argparse.Namespace, raw_dir: Path, processed_dir:
         ],
         check=True,
     )
+    if not args.use_depth:
+        return None
+
+    depth_hist_output = (
+        args.preview_depth_hist_output
+        if args.preview_depth_hist_output is not None
+        else args.preview_output.with_name(f"{args.preview_output.stem}_depth_hist.png")
+    )
+    subprocess.run(
+        [
+            sys.executable,
+            "scripts/render_depth_histogram.py",
+            "--data-dir",
+            str(preview_data_dir),
+            "--num-chunks",
+            str(args.preview_num_chunks),
+            "--depth-min-mm",
+            str(args.depth_min_mm),
+            "--depth-max-mm",
+            str(args.depth_max_mm),
+            "--out",
+            str(depth_hist_output),
+        ],
+        check=True,
+    )
+    return depth_hist_output
 
 
-def maybe_open_preview(preview_output: Path) -> None:
+def maybe_open_preview(preview_outputs: list[Path]) -> None:
     answer = input("Do you want to open the training preview? (Y/n) ").strip().lower()
     if answer not in {"", "y", "yes"}:
         return
+    paths = [p for p in preview_outputs if p is not None]
     if sys.platform == "darwin":
-        subprocess.run(["open", str(preview_output)], check=False)
+        for path in paths:
+            subprocess.run(["open", str(path)], check=False)
     elif sys.platform.startswith("linux"):
-        subprocess.run(["xdg-open", str(preview_output)], check=False)
+        for path in paths:
+            subprocess.run(["xdg-open", str(path)], check=False)
     elif sys.platform == "win32":
-        subprocess.run(["cmd", "/c", "start", "", str(preview_output)], check=False)
+        for path in paths:
+            subprocess.run(["cmd", "/c", "start", "", str(path)], check=False)
     else:
         print(f"Unsupported platform for auto-open: {sys.platform}")
 
@@ -392,13 +422,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--preview-fps", type=int, default=15)
     parser.add_argument("--preview-output", type=Path, default=Path("training_preview.mp4"))
     parser.add_argument(
+        "--preview-depth-hist-output",
+        type=Path,
+        default=None,
+        help="Optional output PNG for depth histogram preview (default: <preview-output>_depth_hist.png)",
+    )
+    parser.add_argument(
         "--use-depth",
         action="store_true",
         default=False,
         help="Enable depth channel preprocessing/training for this run",
     )
     parser.add_argument("--depth-min-mm", type=int, default=200)
-    parser.add_argument("--depth-max-mm", type=int, default=3000)
+    parser.add_argument("--depth-max-mm", type=int, default=2000)
     parser.add_argument("--chunk-size", type=int, default=1000)
     parser.add_argument("--smoke-test", action="store_true", help="Use hydra config trainer_smoke")
     parser.add_argument("--epochs", type=int, default=None, help="Override training.num_final_epochs")
@@ -500,9 +536,13 @@ def main() -> None:
 
         if not args.skip_preview:
             download_preview_sample(entries, args.preview_sample_count, raw_preview_dir, project)
-            run_preview_pipeline(args, raw_preview_dir, processed_preview_dir)
+            depth_hist_output = run_preview_pipeline(args, raw_preview_dir, processed_preview_dir)
             print(f"Preview video: {args.preview_output}")
-            maybe_open_preview(args.preview_output)
+            if depth_hist_output is not None:
+                print(f"Preview depth histogram: {depth_hist_output}")
+                print("Depth format: HDF5 stores depth as uint8 in channel 4 (index 3).")
+                print("Model input: loader maps depth with x/255*2-1 to [-1, 1].")
+            maybe_open_preview([args.preview_output, depth_hist_output] if depth_hist_output else [args.preview_output])
 
         print_submission_summary(
             run_name=run_name,
