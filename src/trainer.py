@@ -482,7 +482,7 @@ class Trainer(StateDictMixin):
         max_batches = getattr(self._cfg.evaluation, "max_test_batches", None)
         model.eval()
         model.to(self._device)
-        to_log = []
+        raw_metrics = []
         for i, batch in enumerate(tqdm(data_loader, desc=f"Evaluating {name}")):
             if max_batches is not None and i >= max_batches:
                 break
@@ -491,12 +491,20 @@ class Trainer(StateDictMixin):
             num_batch = self.num_batch_test.get(name)
             metrics[f"num_batch_test_{name}"] = num_batch
             self.num_batch_test.set(name, num_batch + 1)
-            to_log.append(metrics)
+            raw_metrics.append(metrics)
 
-        process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
-        to_log = [{f"{name}/test/{k}": v for k, v in d.items()} for d in to_log]
+        process_confusion_matrices_if_any_and_compute_classification_metrics(raw_metrics)
+
+        summary = {}
+        if raw_metrics:
+            numeric_keys = [k for k in raw_metrics[0] if isinstance(raw_metrics[0][k], (int, float))]
+            for k in numeric_keys:
+                vals = [m[k] for m in raw_metrics if k in m and isinstance(m[k], (int, float))]
+                if vals:
+                    summary[f"{name}/test/{k}"] = sum(vals) / len(vals)
+
         model.to("cpu")
-        return to_log
+        return [summary] if summary else []
 
     @torch.no_grad()
     def run_inference_samples(self) -> Logs:

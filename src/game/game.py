@@ -1,13 +1,18 @@
+import time
+from pathlib import Path
 from typing import Tuple, Union
 
 import numpy as np
 import pygame
+import torch
 from PIL import Image
 
 from csgo.action_processing import CSGOAction
 from depth_viz import colorize_inverse_depth_uint8
 from .dataset_env import DatasetEnv
 from .play_env import PlayEnv
+
+_LOGO_PATH = Path(__file__).resolve().parents[2] / "omgrab_logo.png"
 
 
 class Game:
@@ -38,33 +43,98 @@ class Game:
     def run(self) -> None:
         pygame.init()
 
-        header_height = 150 if self.verbose else 0
-        header_width = 540
-        font_size = 16
         screen = pygame.display.set_mode((1280, 720))
+        logo_surface = None
+        if _LOGO_PATH.exists():
+            logo_img = pygame.image.load(str(_LOGO_PATH))
+            logo_h = 48
+            logo_w = int(logo_img.get_width() * logo_h / logo_img.get_height())
+            logo_surface = pygame.transform.smoothscale(logo_img, (logo_w, logo_h))
         pygame.mouse.set_visible(False)
         pygame.event.set_grab(True)
         clock = pygame.time.Clock()
-        font = pygame.font.SysFont("mono", font_size)
+        label_font = pygame.font.SysFont("mono", 14)
         x_center, y_center = screen.get_rect().center
-        x_header = x_center - header_width // 2
-        y_header = y_center - self.height // 2 - header_height - 10
-        header_rect = pygame.Rect(x_header, y_header, header_width, header_height)
 
-        def clear_header():
-            pygame.draw.rect(screen, pygame.Color("black"), header_rect)
-            pygame.draw.rect(screen, pygame.Color("white"), header_rect, 1)
-
-        def draw_text(text, idx_line, idx_column, num_cols):
-            x_pos = 5 + idx_column * int(header_width // num_cols)
-            y_pos = 5 + idx_line * font_size
-            assert (0 <= x_pos <= header_width) and (0 <= y_pos <= header_height)
-            screen.blit(font.render(text, True, pygame.Color("white")), (x_header + x_pos, y_header + y_pos))
+        device = getattr(getattr(self.env, "agent", None), "device", None)
+        if device is None:
+            device_str = "cpu"
+        elif isinstance(device, torch.device):
+            device_str = device.type.upper()
+            if device.type == "cuda":
+                device_str = torch.cuda.get_device_name(device.index or 0)
+            elif device.type == "mps":
+                device_str = "Apple MPS"
+        else:
+            device_str = str(device).upper()
 
         has_depth = True  # RGBD model outputs 4 channels
         gap = 10  # pixel gap between RGB and depth panels
+        prev_time = time.monotonic()
+        current_fps = 0.0
 
-        def draw_obs(obs, obs_low_res=None):
+        key_size = 36
+        key_gap = 4
+        color_active = pygame.Color(80, 200, 255)
+        color_inactive = pygame.Color(50, 50, 50)
+        color_border = pygame.Color(100, 100, 100)
+        color_text_active = pygame.Color(0, 0, 0)
+        color_text_inactive = pygame.Color(120, 120, 120)
+        grab_font = pygame.font.SysFont("mono", 14, bold=True)
+
+        def draw_arrow_key(surface, x, y, w, h, direction, active):
+            color = color_active if active else color_inactive
+            txt_color = color_text_active if active else color_text_inactive
+            pygame.draw.rect(surface, color, (x, y, w, h), border_radius=4)
+            pygame.draw.rect(surface, color_border, (x, y, w, h), 1, border_radius=4)
+            cx, cy = x + w // 2, y + h // 2
+            s = 8
+            if direction == "up":
+                pts = [(cx, cy - s), (cx - s, cy + s), (cx + s, cy + s)]
+            elif direction == "down":
+                pts = [(cx, cy + s), (cx - s, cy - s), (cx + s, cy - s)]
+            elif direction == "left":
+                pts = [(cx - s, cy), (cx + s, cy - s), (cx + s, cy + s)]
+            elif direction == "right":
+                pts = [(cx + s, cy), (cx - s, cy - s), (cx - s, cy + s)]
+            pygame.draw.polygon(surface, txt_color, pts)
+
+        def draw_action_indicator(csgo_action):
+            action_names = set()
+            for k in csgo_action.keys:
+                name = pygame.key.name(k)
+                action_names.add(name)
+
+            up = "w" in action_names
+            down = "s" in action_names
+            left = "a" in action_names
+            right = "d" in action_names
+            grab = "space" in action_names
+
+            arrows_w = key_size * 3 + key_gap * 2
+            grab_w = key_size * 3 + key_gap * 2
+            total_w = arrows_w + 40 + grab_w
+            hud_x = x_center - total_w // 2
+            hud_y = y_center + self.height // 2 + 44
+
+            ax = hud_x
+            draw_arrow_key(screen, ax + key_size + key_gap, hud_y, key_size, key_size, "up", up)
+            draw_arrow_key(screen, ax, hud_y + key_size + key_gap, key_size, key_size, "left", left)
+            draw_arrow_key(screen, ax + key_size + key_gap, hud_y + key_size + key_gap, key_size, key_size, "down", down)
+            draw_arrow_key(screen, ax + 2 * (key_size + key_gap), hud_y + key_size + key_gap, key_size, key_size, "right", right)
+
+            gx = hud_x + arrows_w + 40
+            gy = hud_y + key_size + key_gap
+            gw = grab_w
+            gh = key_size
+            g_color = color_active if grab else color_inactive
+            g_txt_color = color_text_active if grab else color_text_inactive
+            pygame.draw.rect(screen, g_color, (gx, gy, gw, gh), border_radius=4)
+            pygame.draw.rect(screen, color_border, (gx, gy, gw, gh), 1, border_radius=4)
+            txt = grab_font.render("GRAB", True, g_txt_color)
+            screen.blit(txt, (gx + (gw - txt.get_width()) // 2, gy + (gh - txt.get_height()) // 2))
+
+        def draw_obs(obs):
             assert obs.ndim == 4 and obs.size(0) == 1
             rgb = obs[0, :3]
             rgb_np = rgb.add(1).div(2).mul(255).clamp(0, 255).byte().permute(1, 2, 0).cpu().numpy()
@@ -84,18 +154,14 @@ class Game:
                 depth_surface = pygame.surfarray.make_surface(depth_pygame)
                 x_depth = x_center + gap // 2
                 screen.blit(depth_surface, (x_depth, y_center - self.height // 2))
+
+                rgb_label = label_font.render("RGB", True, pygame.Color(180, 180, 180))
+                depth_label = label_font.render("DEPTH", True, pygame.Color(180, 180, 180))
+                label_y = y_center - self.height // 2 - 20
+                screen.blit(rgb_label, (x_rgb + self.width // 2 - rgb_label.get_width() // 2, label_y))
+                screen.blit(depth_label, (x_depth + self.width // 2 - depth_label.get_width() // 2, label_y))
             else:
                 screen.blit(surface, (x_center - self.width // 2, y_center - self.height // 2))
-
-            if obs_low_res is not None:
-                assert obs_low_res.ndim == 4 and obs_low_res.size(0) == 1
-                rgb_lr = obs_low_res[0, :3]
-                img = Image.fromarray(rgb_lr.add(1).div(2).mul(255).byte().permute(1, 2, 0).cpu().numpy())
-                h = self.height * obs_low_res.size(2) // obs.size(2)
-                w = self.width * obs_low_res.size(3) // obs.size(3)
-                pygame_image = np.array(img.resize((w, h), resample=Image.BICUBIC)).transpose((1, 0, 2))
-                surface = pygame.surfarray.make_surface(pygame_image)
-                screen.blit(surface, (x_header + header_width - w - 5, y_header + 5 + font_size))
 
         def reset():
             nonlocal obs, info, do_reset, ep_return, ep_length, keys_pressed, l_click, r_click
@@ -185,24 +251,26 @@ class Game:
             ep_return += rew.item()
             ep_length += 1
 
-            if self.verbose and info is not None:
-                clear_header()
-                assert isinstance(info, dict) and "header" in info
-                header = info["header"]
-                num_cols = len(header)
-                for j, col in enumerate(header):
-                    for i, row in enumerate(col):
-                        draw_text(row, idx_line=i, idx_column=j, num_cols=num_cols)
+            now = time.monotonic()
+            dt = now - prev_time
+            if dt > 0:
+                current_fps = 1.0 / dt
+            prev_time = now
 
-            draw_low_res = self.verbose and "obs_low_res" in info and self.width == 280
-            if draw_low_res:
-                draw_obs(obs, info["obs_low_res"])
-                draw_text("  Pre-upsampling:", 0, 2, 3)
-            else:
-                draw_obs(obs, None)
+            screen.fill(pygame.Color("black"))
+            draw_obs(obs)
+            draw_action_indicator(csgo_action)
 
-            pygame.display.flip()  # update screen
-            clock.tick(self.fps)  # ensures game maintains the given frame rate
+            status_txt = label_font.render(f"{current_fps:.1f} FPS  |  {device_str}", True, pygame.Color(180, 180, 180))
+            status_x = x_center - status_txt.get_width() // 2
+            status_y = y_center + self.height // 2 + 12
+            screen.blit(status_txt, (status_x, status_y))
+
+            if logo_surface is not None:
+                screen.blit(logo_surface, (8, 8))
+
+            pygame.display.flip()
+            clock.tick(self.fps)
 
             if end or trunc:
                 reset()

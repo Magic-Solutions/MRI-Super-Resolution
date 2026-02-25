@@ -6,7 +6,7 @@ CSGO_KEYMAP = {
     pygame.K_d: "right",
     pygame.K_a: "left",
     pygame.K_s: "down",
-    pygame.K_SPACE: "jump",
+    pygame.K_SPACE: "grab",
     pygame.K_LCTRL: "crouch",
     pygame.K_LSHIFT: "walk",
     pygame.K_1: "weapon1",
