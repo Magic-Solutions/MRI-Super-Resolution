@@ -478,10 +478,13 @@ class Trainer(StateDictMixin):
     def test_component(self, name: str) -> Logs:
         model = getattr(self.agent, name)
         data_loader = self._data_loader_test.get(name)
+        max_batches = getattr(self._cfg.evaluation, "max_test_batches", None)
         model.eval()
         model.to(self._device)
         to_log = []
-        for batch in tqdm(data_loader, desc=f"Evaluating {name}"):
+        for i, batch in enumerate(tqdm(data_loader, desc=f"Evaluating {name}")):
+            if max_batches is not None and i >= max_batches:
+                break
             batch = batch.to(self._device)
             _, metrics = model(batch)
             num_batch = self.num_batch_test.get(name)
