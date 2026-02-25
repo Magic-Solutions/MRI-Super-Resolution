@@ -9,11 +9,13 @@ import numpy as np
 from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
+from models.diffusion import DiffusionSampler
 from coroutines.collector import make_collector, NumToCollect
 from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, CSGOHdf5Dataset
 from envs import make_atari_env, WorldModelEnv
@@ -306,6 +308,7 @@ class Trainer(StateDictMixin):
 
             if should_test and not self._is_model_free:
                 to_log += self.test_agent()
+                to_log += self.run_inference_samples()
 
             # Logging
             to_log.append({"duration": (time.time() - start_time) / 3600})
@@ -489,6 +492,145 @@ class Trainer(StateDictMixin):
         process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
         to_log = [{f"{name}/test/{k}": v for k, v in d.items()} for d in to_log]
         model.to("cpu")
+        return to_log
+
+    @torch.no_grad()
+    def run_inference_samples(self) -> Logs:
+        """Run autoregressive inference on test data and log comparison images to W&B."""
+        cfg = self._cfg
+        num_samples = cfg.evaluation.num_inference_samples
+        num_gen_steps = cfg.evaluation.num_inference_steps
+
+        denoiser = self.agent.denoiser
+        upsampler = self.agent.upsampler
+
+        denoiser.eval().to(self._device)
+        if upsampler is not None:
+            upsampler.eval().to(self._device)
+
+        sampler_next_obs = DiffusionSampler(
+            denoiser, instantiate(cfg.world_model_env.diffusion_sampler_next_obs),
+        )
+        sampler_up = None
+        if upsampler is not None:
+            sampler_up = DiffusionSampler(
+                upsampler, instantiate(cfg.world_model_env.diffusion_sampler_upsampling),
+            )
+            n_cond_up = cfg.agent.upsampler.inner_model.num_steps_conditioning
+            up_factor = upsampler.cfg.upsampling_factor
+
+        n_cond = cfg.agent.denoiser.inner_model.num_steps_conditioning
+        seq_length = n_cond + 1 + num_gen_steps
+        traverser = DatasetTraverser(self.test_dataset, 1, seq_length)
+
+        to_log = []
+        sample_count = 0
+
+        for batch in traverser:
+            if sample_count >= num_samples:
+                break
+
+            batch = batch.to(self._device)
+            obs_lr = batch.obs
+            act = batch.act
+            mask = batch.mask_padding[0]
+
+            has_hr = (
+                batch.info
+                and batch.info[0]
+                and isinstance(batch.info[0], dict)
+                and "full_res" in batch.info[0]
+            )
+            obs_hr = None
+            if has_hr:
+                obs_hr = batch.info[0]["full_res"].to(self._device)
+                if obs_hr.ndim == 4:
+                    obs_hr = obs_hr.unsqueeze(0)
+
+            n_valid = mask.sum().item()
+            n_gen = min(num_gen_steps, n_valid - n_cond)
+            if n_gen <= 0:
+                continue
+
+            obs_buf = obs_lr[:, :n_cond].clone()
+            act_buf = act[:, :n_cond].clone()
+            gen_lr = list(obs_buf[0])
+
+            if sampler_up is not None and has_hr:
+                obs_hr_buf = obs_hr[:, :n_cond].clone()
+                gen_hr = list(obs_hr_buf[0])
+            else:
+                gen_hr = None
+
+            for step in range(n_gen):
+                next_lr, _ = sampler_next_obs.sample(obs_buf, act_buf)
+                gen_lr.append(next_lr[0])
+
+                if sampler_up is not None and has_hr:
+                    low_up = F.interpolate(
+                        next_lr, scale_factor=up_factor, mode="bicubic",
+                    ).unsqueeze(1)
+                    next_hr, _ = sampler_up.sample(
+                        torch.cat((obs_hr_buf[:, -n_cond_up:], low_up), dim=1), None,
+                    )
+                    gen_hr.append(next_hr[0])
+                    obs_hr_buf = obs_hr_buf.roll(-1, dims=1)
+                    obs_hr_buf[:, -1] = next_hr
+
+                obs_buf = obs_buf.roll(-1, dims=1)
+                act_buf = act_buf.roll(-1, dims=1)
+                obs_buf[:, -1] = next_lr
+                t_idx = n_cond + step
+                if t_idx < act.size(1):
+                    act_buf[:, -1] = act[:, t_idx]
+
+            def to_rgb(t):
+                img = t.clamp(-1, 1).add(1).div(2).mul(255).byte()
+                if img.shape[0] >= 4:
+                    img = img[:3]
+                return img.permute(1, 2, 0).cpu().numpy()
+
+            total = len(gen_lr)
+            vis_idx = sorted(set([
+                n_cond - 1,
+                n_cond,
+                n_cond + max(1, n_gen // 4),
+                n_cond + n_gen // 2,
+                n_cond + 3 * n_gen // 4,
+                total - 1,
+            ]))
+            vis_idx = [i for i in vis_idx if i < total and i < obs_lr.size(1)]
+
+            if gen_hr is not None:
+                gt_imgs = [to_rgb(obs_hr[0, i]) for i in vis_idx]
+                pred_imgs = [to_rgb(gen_hr[i]) for i in vis_idx]
+                res_label = "HR"
+            else:
+                gt_imgs = [to_rgb(obs_lr[0, i]) for i in vis_idx]
+                pred_imgs = [to_rgb(gen_lr[i]) for i in vis_idx]
+                res_label = "LR"
+
+            h, w, ch = gt_imgs[0].shape
+            gap = 2
+            n_cols = len(vis_idx)
+            grid = np.full((2 * h + gap, n_cols * w + (n_cols - 1) * gap, ch), 128, dtype=np.uint8)
+            for j in range(n_cols):
+                x = j * (w + gap)
+                grid[:h, x:x + w] = gt_imgs[j]
+                grid[h + gap:, x:x + w] = pred_imgs[j]
+
+            frame_labels = ", ".join(str(i) for i in vis_idx)
+            to_log.append({
+                f"inference/sample_{sample_count}": wandb.Image(
+                    grid, caption=f"Top: GT | Bottom: Gen ({res_label}) | frames: {frame_labels}",
+                ),
+            })
+            sample_count += 1
+
+        denoiser.to("cpu")
+        if upsampler is not None:
+            upsampler.to("cpu")
+
         return to_log
 
     def load_state_checkpoint(self) -> None:

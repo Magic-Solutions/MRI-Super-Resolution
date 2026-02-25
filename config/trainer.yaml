@@ -66,6 +66,8 @@ training:
 evaluation:
   should: True
   every: 20
+  num_inference_samples: 3
+  num_inference_steps: 20
 
 denoiser:
   training:
