@@ -3,12 +3,7 @@
 Downloads the trainer config, checkpoint, and one HDF5 episode (for spawn
 generation), then launches the interactive game.  No local data needed.
 
-Usage:
-    python scripts/run_inference_from_bucket.py run-20260224-045328
-    python scripts/run_inference_from_bucket.py run-20260224-045328 --epoch 10
-    python scripts/run_inference_from_bucket.py run-20260224-045328 --bucket gs://my-bucket
-    python scripts/run_inference_from_bucket.py run-20260224-045328 --world-model-env higher_quality
-
+doe
 GCS layout expected:
     gs://BUCKET/diamond/runs/{run_id}/
         training_run/hydra/{run_id}/
@@ -19,6 +14,7 @@ GCS layout expected:
 
 import argparse
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -35,6 +31,7 @@ DEFAULT_BUCKET = "gs://omgrab-dev-diamond-vertex-artifacts"
 
 LOW_RES_SIZE = (56, 30)  # (width, height) for PIL
 NUM_CONDITIONING = 4
+NUM_SPAWNS = 3
 
 
 def gcs_cp(src: str, dst: str) -> None:
@@ -205,14 +202,22 @@ def main() -> None:
             print(f"       Downloading {hdf5_name} ...")
             gcs_cp(hdf5_files[0].strip(), str(local_hdf5))
 
-        print(f"       Generating spawn from {hdf5_name} ...")
-        generate_spawn_from_hdf5(local_hdf5, spawn_dir / "000")
-        local_hdf5.unlink()
+        with h5py.File(local_hdf5, "r") as f:
+            n_frames = sum(1 for k in f.keys() if k.endswith("_x"))
+        max_start = n_frames - NUM_CONDITIONING - 1
+        if max_start < 0:
+            print(f"       ERROR: HDF5 has only {n_frames} frames, need at least {NUM_CONDITIONING + 1}")
+            sys.exit(1)
 
-        fr = np.load(spawn_dir / "000" / "full_res.npy")
-        lr = np.load(spawn_dir / "000" / "low_res.npy")
-        print(f"       full_res: {fr.shape} {fr.dtype}")
-        print(f"       low_res:  {lr.shape} {lr.dtype}")
+        starts = sorted(random.sample(range(max_start + 1), min(NUM_SPAWNS, max_start + 1)))
+        print(f"       Generating {len(starts)} spawns from {hdf5_name} (frames: {starts}) ...")
+        for idx, start in enumerate(starts):
+            generate_spawn_from_hdf5(local_hdf5, spawn_dir / f"{idx:03d}", start_frame=start)
+            fr = np.load(spawn_dir / f"{idx:03d}" / "full_res.npy")
+            lr = np.load(spawn_dir / f"{idx:03d}" / "low_res.npy")
+            print(f"       [{idx}] start={start:>5d}  full_res: {fr.shape}  low_res: {lr.shape}")
+
+        local_hdf5.unlink()
 
     # 4. Launch game
     print(f"\n[4/4] Launching inference ...")
