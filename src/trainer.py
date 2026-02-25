@@ -15,6 +15,7 @@ from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
+from depth_viz import colorize_inverse_depth_uint8
 from models.diffusion import DiffusionSampler
 from coroutines.collector import make_collector, NumToCollect
 from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, CSGOHdf5Dataset
@@ -587,11 +588,21 @@ class Trainer(StateDictMixin):
                 if t_idx < act.size(1):
                     act_buf[:, -1] = act[:, t_idx]
 
+            def frame_to_uint8(t):
+                return t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu()
+
             def to_rgb(t):
-                img = t.clamp(-1, 1).add(1).div(2).mul(255).byte()
+                img = frame_to_uint8(t)
                 if img.shape[0] >= 4:
                     img = img[:3]
-                return img.permute(1, 2, 0).cpu().numpy()
+                return img.permute(1, 2, 0).numpy()
+
+            def to_depth_colorized(t):
+                img = frame_to_uint8(t)
+                if img.shape[0] < 4:
+                    return None
+                depth_u8 = img[3].numpy()
+                return colorize_inverse_depth_uint8(depth_u8)
 
             total = len(gen_lr)
             vis_idx = sorted(set([
@@ -605,29 +616,49 @@ class Trainer(StateDictMixin):
             vis_idx = [i for i in vis_idx if i < total and i < obs_lr.size(1)]
 
             if gen_hr is not None:
-                gt_imgs = [to_rgb(obs_hr[0, i]) for i in vis_idx]
-                pred_imgs = [to_rgb(gen_hr[i]) for i in vis_idx]
-                res_label = "HR"
+                src_gt, src_gen, res_label = obs_hr[0], gen_hr, "HR"
             else:
-                gt_imgs = [to_rgb(obs_lr[0, i]) for i in vis_idx]
-                pred_imgs = [to_rgb(gen_lr[i]) for i in vis_idx]
-                res_label = "LR"
+                src_gt, src_gen, res_label = obs_lr[0], gen_lr, "LR"
 
-            h, w, ch = gt_imgs[0].shape
-            gap = 2
-            n_cols = len(vis_idx)
-            grid = np.full((2 * h + gap, n_cols * w + (n_cols - 1) * gap, ch), 128, dtype=np.uint8)
-            for j in range(n_cols):
-                x = j * (w + gap)
-                grid[:h, x:x + w] = gt_imgs[j]
-                grid[h + gap:, x:x + w] = pred_imgs[j]
+            gt_rgb = [to_rgb(src_gt[i]) for i in vis_idx]
+            gen_rgb = [to_rgb(src_gen[i]) for i in vis_idx]
+
+            has_depth_ch = src_gt[0].shape[0] >= 4
+            gt_depth = [to_depth_colorized(src_gt[i]) for i in vis_idx] if has_depth_ch else None
+            gen_depth = [to_depth_colorized(src_gen[i]) for i in vis_idx] if has_depth_ch else None
+
+            def make_grid(row_pairs):
+                h, w, _ = row_pairs[0][0].shape
+                gap = 2
+                n_cols = len(row_pairs[0])
+                n_rows = len(row_pairs)
+                grid_w = n_cols * w + (n_cols - 1) * gap
+                grid_h = n_rows * h + (n_rows - 1) * gap
+                grid = np.full((grid_h, grid_w, 3), 128, dtype=np.uint8)
+                for r, row in enumerate(row_pairs):
+                    y = r * (h + gap)
+                    for c, img in enumerate(row):
+                        x = c * (w + gap)
+                        grid[y:y + h, x:x + w] = img
+                return grid
 
             frame_labels = ", ".join(str(i) for i in vis_idx)
+
+            rgb_grid = make_grid([gt_rgb, gen_rgb])
             to_log.append({
-                f"inference/sample_{sample_count}": wandb.Image(
-                    grid, caption=f"Top: GT | Bottom: Gen ({res_label}) | frames: {frame_labels}",
+                f"inference/sample_{sample_count}_rgb": wandb.Image(
+                    rgb_grid, caption=f"RGB ({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
                 ),
             })
+
+            if gt_depth is not None and gen_depth is not None:
+                depth_grid = make_grid([gt_depth, gen_depth])
+                to_log.append({
+                    f"inference/sample_{sample_count}_depth": wandb.Image(
+                        depth_grid, caption=f"Depth ({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
+                    ),
+                })
+
             sample_count += 1
 
         denoiser.to("cpu")
