@@ -565,7 +565,7 @@ def main() -> None:
             train_overrides=train_overrides,
         )
 
-        if not args.yes:
+        if not args.yes and not args.skip_preview:
             answer = input("Submit Vertex job with this recording set? [y/N] ").strip().lower()
             if answer not in {"y", "yes"}:
                 print("Cancelled.")
