@@ -9,7 +9,7 @@ hydra:
     chdir: True
 
 wandb:
-  mode: disabled
+  mode: online
   project: diamond-depth
   entity: omgrab
   name: smoke-test
@@ -61,8 +61,11 @@ training:
   compile_wm: False
 
 evaluation:
-  should: False
+  should: True
   every: 1
+  max_test_batches: 10
+  num_inference_samples: 2
+  num_inference_steps: 5
 
 denoiser:
   training:

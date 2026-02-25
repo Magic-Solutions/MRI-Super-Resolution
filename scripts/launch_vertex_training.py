@@ -436,7 +436,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-min-mm", type=int, default=200)
     parser.add_argument("--depth-max-mm", type=int, default=1500)
     parser.add_argument("--chunk-size", type=int, default=1000)
-    parser.add_argument("--smoke-test", action="store_true", help="Use hydra config trainer_smoke")
+    parser.add_argument("--smoke-test", action="store_true", help="Use hydra config trainer_smoke (shortcut for --config-name trainer_smoke)")
+    parser.add_argument("--config-name", default=None, help="Hydra config name (default: trainer). Overrides --smoke-test.")
     parser.add_argument("--epochs", type=int, default=None, help="Override training.num_final_epochs")
     parser.add_argument("--steps-per-epoch", type=int, default=None, help="Set denoiser/upsampler steps per epoch")
     parser.add_argument("--denoiser-steps-per-epoch", type=int, default=None, help="Override denoiser steps per epoch")
@@ -501,7 +502,12 @@ def main() -> None:
     run_name = args.run_name or datetime.utcnow().strftime("run-%Y%m%d-%H%M%S")
     display_name = f"{args.display_name_prefix}-{run_name}"
     output_uri = f"{artifact_bucket_uri.rstrip('/')}/runs/{run_name}"
-    config_name = "trainer_smoke" if args.smoke_test else "trainer"
+    if args.config_name:
+        config_name = args.config_name
+    elif args.smoke_test:
+        config_name = "trainer_smoke"
+    else:
+        config_name = "trainer"
     train_overrides = build_train_override_string(args)
 
     entries: list[tuple[str, str]] = []
