@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--local-ckpt", type=str, default=None, help="Path to local agent checkpoint.")
     parser.add_argument("--spawn-dir", type=str, default=None, help="Path to spawn directory.")
+    parser.add_argument("--world-model-env", type=str, default=None, help="Override world_model_env config (e.g. fast, higher_quality).")
     return parser.parse_args()
 
 
@@ -104,8 +105,12 @@ def main():
     if not ok:
         return
 
+    overrides = []
+    if args.world_model_env is not None:
+        overrides.append(f"world_model_env={args.world_model_env}")
+
     with initialize(version_base="1.3", config_path="../config"):
-        cfg = compose(config_name="trainer")
+        cfg = compose(config_name="trainer", overrides=overrides)
     if args.use_depth is not None:
         cfg.use_depth = bool(args.use_depth)
 
