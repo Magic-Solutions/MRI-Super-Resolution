@@ -25,6 +25,8 @@ def build_job_config(args: argparse.Namespace) -> dict:
     ]
     if args.train_overrides:
         container_env.append({"name": "TRAIN_OVERRIDES", "value": args.train_overrides})
+    if args.init_checkpoint_uri:
+        container_env.append({"name": "INIT_CHECKPOINT_URI", "value": args.init_checkpoint_uri})
     if args.project:
         container_env.append({"name": "GCP_PROJECT", "value": args.project})
 
@@ -82,6 +84,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-min-mm", type=int, default=200)
     parser.add_argument("--depth-max-mm", type=int, default=1500)
     parser.add_argument("--train-overrides", default="")
+    parser.add_argument("--init-checkpoint-uri", default=None, help="GCS URI of checkpoint to initialize from")
     parser.add_argument("--wait-for-start", dest="wait_for_start", action="store_true", default=True, help="Wait and report until job enters RUNNING state")
     parser.add_argument("--no-wait-for-start", dest="wait_for_start", action="store_false", help="Return immediately after submission")
     parser.add_argument("--start-timeout-seconds", type=int, default=900, help="Max seconds to wait for RUNNING state")

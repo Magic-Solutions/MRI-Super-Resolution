@@ -321,6 +321,25 @@ def print_submission_summary(
     print("=" * 72 + "\n")
 
 
+def resolve_checkpoint_uri(run_name: str, artifact_bucket_uri: str, project: str | None) -> str:
+    """Find the latest agent_epoch_*.pt checkpoint in a previous run."""
+    prefix_uri = f"{artifact_bucket_uri.rstrip('/')}/runs/{run_name}/training_run/hydra/{run_name}/checkpoints/"
+    bucket_name, prefix = parse_gs_uri(prefix_uri)
+    client = storage.Client(project=project) if project else storage.Client()
+    candidates: list[str] = []
+    for blob in client.list_blobs(bucket_name, prefix=prefix):
+        if blob.name.endswith(".pt") and "agent_epoch_" in blob.name:
+            candidates.append(blob.name)
+    if not candidates:
+        raise ValueError(
+            f"No agent_epoch_*.pt checkpoint found under gs://{bucket_name}/{prefix}\n"
+            f"Check that run '{run_name}' completed and uploaded checkpoints."
+        )
+    candidates.sort()
+    latest = candidates[-1]
+    return f"gs://{bucket_name}/{latest}"
+
+
 def build_train_override_string(args: argparse.Namespace) -> str:
     overrides: list[str] = []
     if args.epochs is not None:
@@ -338,6 +357,13 @@ def build_train_override_string(args: argparse.Namespace) -> str:
     if args.upsampler_steps_per_epoch is not None:
         overrides.append(f"upsampler.training.steps_per_epoch={args.upsampler_steps_per_epoch}")
         overrides.append(f"upsampler.training.steps_first_epoch={args.upsampler_steps_per_epoch}")
+    if args.lr is not None:
+        overrides.append(f"denoiser.optimizer.lr={args.lr}")
+    if args.autoregressive_steps is not None:
+        overrides.append(f"denoiser.training.num_autoregressive_steps={args.autoregressive_steps}")
+    if args.grad_acc_steps is not None:
+        overrides.append(f"denoiser.training.grad_acc_steps={args.grad_acc_steps}")
+        overrides.append(f"upsampler.training.grad_acc_steps={args.grad_acc_steps}")
     if args.train_overrides:
         overrides.extend(shlex.split(args.train_overrides))
     overrides.append(f"use_depth={'true' if args.use_depth else 'false'}")
@@ -443,6 +469,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--denoiser-steps-per-epoch", type=int, default=None, help="Override denoiser steps per epoch")
     parser.add_argument("--upsampler-steps-per-epoch", type=int, default=None, help="Override upsampler steps per epoch")
     parser.add_argument("--eval-every", type=int, default=None, help="Override evaluation.every")
+    parser.add_argument("--from-checkpoint", default=None, help="Previous run name (e.g. run-20260225-060050) to resume from latest checkpoint")
+    parser.add_argument("--lr", type=float, default=None, help="Override optimizer learning rate for both denoiser and upsampler")
+    parser.add_argument("--autoregressive-steps", type=int, default=None, help="Override denoiser.training.num_autoregressive_steps")
+    parser.add_argument("--grad-acc-steps", type=int, default=None, help="Override grad_acc_steps for both denoiser and upsampler")
     parser.add_argument("--train-overrides", default="")
     parser.add_argument("--machine-type", default="a2-highgpu-1g")
     parser.add_argument("--accelerator-type", default="NVIDIA_TESLA_A100")
@@ -509,6 +539,14 @@ def main() -> None:
     else:
         config_name = "trainer"
     train_overrides = build_train_override_string(args)
+
+    init_checkpoint_uri: str | None = None
+    if args.from_checkpoint:
+        print(f"Resolving latest checkpoint from run: {args.from_checkpoint}")
+        init_checkpoint_uri = resolve_checkpoint_uri(
+            args.from_checkpoint, artifact_bucket_uri, project
+        )
+        print(f"  -> {init_checkpoint_uri}")
 
     entries: list[tuple[str, str]] = []
     for r in args.recording_uri:
@@ -616,6 +654,8 @@ def main() -> None:
         ]
         if args.use_depth:
             submit_cmd.append("--use-depth")
+        if init_checkpoint_uri:
+            submit_cmd.extend(["--init-checkpoint-uri", init_checkpoint_uri])
         if args.dry_run:
             submit_cmd.append("--dry-run")
         subprocess.run(submit_cmd, check=True)

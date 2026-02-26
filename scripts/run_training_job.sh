@@ -101,6 +101,23 @@ cat > "${RUN_DIR}/run_metadata.json" <<EOF
 }
 EOF
 
+INIT_CKPT_LOCAL=""
+if [[ -n "${INIT_CHECKPOINT_URI:-}" ]]; then
+  INIT_CKPT_LOCAL="${WORK_ROOT}/init_checkpoint.pt"
+  echo "Downloading init checkpoint ${INIT_CHECKPOINT_URI} -> ${INIT_CKPT_LOCAL}"
+  python - "${INIT_CHECKPOINT_URI}" "${INIT_CKPT_LOCAL}" <<'PY'
+import sys, os
+from google.cloud import storage
+
+src, dst = sys.argv[1], sys.argv[2]
+bucket = src[len("gs://"):].split("/", 1)[0]
+blob = src[len("gs://") + len(bucket) + 1:]
+client = storage.Client(project=os.environ.get("GCP_PROJECT") or None)
+client.bucket(bucket).blob(blob).download_to_filename(dst)
+print(f"Downloaded checkpoint to {dst}")
+PY
+fi
+
 echo "Starting training run ${RUN_NAME}"
 CHECKPOINTS_DIR="${HYDRA_RUN_DIR}/checkpoints"
 CHECKPOINTS_DST_PREFIX="${OUTPUT_URI}/training_run/hydra/${RUN_NAME}/checkpoints"
@@ -141,6 +158,11 @@ sync_checkpoints_if_changed() {
   fi
 }
 
+INIT_CKPT_OVERRIDE=""
+if [[ -n "${INIT_CKPT_LOCAL}" ]]; then
+  INIT_CKPT_OVERRIDE="initialization.path_to_ckpt=${INIT_CKPT_LOCAL}"
+fi
+
 python src/main.py \
   --config-name "${CONFIG_NAME}" \
   "use_depth=${USE_DEPTH,,}" \
@@ -148,6 +170,7 @@ python src/main.py \
   "env.path_data_full_res=${PROCESSED_DIR}/full_res" \
   "wandb.name=${RUN_NAME}" \
   "hydra.run.dir=${HYDRA_RUN_DIR}" \
+  ${INIT_CKPT_OVERRIDE} \
   ${TRAIN_OVERRIDES} &
 TRAIN_PID=$!
 
