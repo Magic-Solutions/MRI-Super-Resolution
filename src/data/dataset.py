@@ -203,3 +203,71 @@ class CSGOHdf5Dataset(StateDictMixin, TorchDataset):
     def load_episode(self, episode_id: int) -> Episode:  # used by DatasetTraverser
         s = self[SegmentId(episode_id, 0, self._length_one_episode)]
         return Episode(s.obs, s.act, s.rew, s.end, s.trunc, s.info)
+
+
+class MRIHdf5Dataset(StateDictMixin, TorchDataset):
+    """Full-resolution MRI HDF5 dataset.
+
+    Each HDF5 file has keys ``frame_{i}_x`` containing 2D grayscale slices
+    of shape ``(H, W)`` stored as uint8.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        super().__init__()
+        filenames = sorted(Path(directory).rglob("*.hdf5"), key=lambda x: x.stem)
+        self._filenames = {f"{x.parent.name}/{x.name}": x for x in filenames}
+        self.num_channels = 1
+
+        self._episode_lengths: Dict[str, int] = {}
+        for key, path in self._filenames.items():
+            with h5py.File(path, "r") as f:
+                n_frames = sum(1 for k in f.keys() if k.endswith("_x"))
+            self._episode_lengths[key] = n_frames
+
+        self._keys = list(self._filenames.keys())
+        self.num_episodes = len(self._keys)
+        self.lengths = np.array([self._episode_lengths[k] for k in self._keys], dtype=np.int64)
+        self.num_steps = int(self.lengths.sum())
+
+    def __len__(self) -> int:
+        return self.num_steps
+
+    def save_to_default_path(self) -> None:
+        pass
+
+    def __getitem__(self, segment_id: SegmentId) -> Segment:
+        key = segment_id.episode_id
+        ep_len = self._episode_lengths[key]
+        assert segment_id.start < ep_len and segment_id.stop > 0 and segment_id.start < segment_id.stop
+        pad_len_right = max(0, segment_id.stop - ep_len)
+        pad_len_left = max(0, -segment_id.start)
+
+        start = max(0, segment_id.start)
+        stop = min(ep_len, segment_id.stop)
+        mask_padding = torch.cat((torch.zeros(pad_len_left), torch.ones(stop - start), torch.zeros(pad_len_right))).bool()
+
+        with h5py.File(self._filenames[key], "r") as f:
+            frame_keys = sorted(
+                [k for k in f.keys() if k.endswith("_x")],
+                key=lambda k: int(k.split("_")[1]),
+            )
+            obs = torch.stack([
+                torch.from_numpy(np.asarray(f[frame_keys[i]])).unsqueeze(0).float().div(255).mul(2).sub(1)
+                for i in range(start, stop)
+            ])
+
+        def pad(x):
+            right = F.pad(x, [0 for _ in range(2 * x.ndim - 1)] + [pad_len_right]) if pad_len_right > 0 else x
+            return F.pad(right, [0 for _ in range(2 * x.ndim - 2)] + [pad_len_left, 0]) if pad_len_left > 0 else right
+
+        obs = pad(obs)
+        n = obs.size(0)
+        rew = torch.zeros(n)
+        end = torch.zeros(n, dtype=torch.uint8)
+        trunc = torch.zeros(n, dtype=torch.uint8)
+        return Segment(obs, None, rew, end, trunc, mask_padding, info={}, id=SegmentId(key, start, stop))
+
+    def load_episode(self, episode_id: str) -> Episode:
+        ep_len = self._episode_lengths[episode_id]
+        s = self[SegmentId(episode_id, 0, ep_len)]
+        return Episode(s.obs, torch.zeros(len(s.obs), 0), s.rew, s.end, s.trunc, s.info)

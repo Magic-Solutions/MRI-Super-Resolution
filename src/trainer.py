@@ -15,10 +15,13 @@ from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
-from depth_viz import colorize_inverse_depth_uint8
+try:
+    from depth_viz import colorize_inverse_depth_uint8
+except ImportError:
+    colorize_inverse_depth_uint8 = None
 from models.diffusion import DiffusionSampler
 from coroutines.collector import make_collector, NumToCollect
-from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, CSGOHdf5Dataset
+from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, CSGOHdf5Dataset, MRIHdf5Dataset
 from envs import make_atari_env, WorldModelEnv
 from utils import (
     broadcast_if_needed,
@@ -52,7 +55,12 @@ class Trainer(StateDictMixin):
         set_seed(torch.seed() % 10 ** 9)
 
         # Device
-        self._device = torch.device("cuda" if torch.cuda.is_available() else "cpu", self._rank)
+        if torch.cuda.is_available():
+            self._device = torch.device("cuda", self._rank)
+        elif torch.backends.mps.is_available():
+            self._device = torch.device("mps")
+        else:
+            self._device = torch.device("cpu")
         print(f"Starting on {self._device}")
         self._use_cuda = self._device.type == "cuda"
         if self._use_cuda:
@@ -99,14 +107,40 @@ class Trainer(StateDictMixin):
             path_config.parent.mkdir(exist_ok=False, parents=False)
             shutil.move(".hydra/config.yaml", path_config)
             wandb.save(str(path_config))
-            shutil.copytree(src=root_dir / "src", dst="./src")
+            # Avoid copying large runtime data folders into each run output.
+            def _ignore_runtime_data(_, names):
+                blocked = {
+                    "processed_data",
+                    "processed_data_mri",
+                    "raw_data",
+                    "__pycache__",
+                }
+                return [name for name in names if name in blocked]
+
+            shutil.copytree(src=root_dir / "src", dst="./src", ignore=_ignore_runtime_data)
             shutil.copytree(src=root_dir / "scripts", dst="./scripts")
         
-        if cfg.env.train.id == "csgo":
+        def _resolve_path(path_like: str | Path | None) -> Path | None:
+            if path_like is None:
+                return None
+            p = Path(path_like).expanduser()
+            return p if p.is_absolute() else (root_dir / p)
+
+        if cfg.env.train.id == "mri":
+            assert cfg.env.path_data_low_res is not None and cfg.env.path_data_full_res is not None
+            assert self._is_static_dataset
+            num_actions = cfg.env.num_actions
+            full_res_path = _resolve_path(cfg.env.path_data_full_res)
+            assert full_res_path is not None
+            dataset_full_res = MRIHdf5Dataset(full_res_path)
+
+        elif cfg.env.train.id == "csgo":
             assert cfg.env.path_data_low_res is not None and cfg.env.path_data_full_res is not None, "Make sure to download CSGO data and set the relevant paths in cfg.env"
             assert self._is_static_dataset
             num_actions = cfg.env.num_actions
-            dataset_full_res = CSGOHdf5Dataset(Path(cfg.env.path_data_full_res))
+            full_res_path = _resolve_path(cfg.env.path_data_full_res)
+            assert full_res_path is not None
+            dataset_full_res = CSGOHdf5Dataset(full_res_path)
             expected_channels = int(cfg.agent.denoiser.inner_model.img_channels)
             if dataset_full_res.num_channels != expected_channels:
                 raise ValueError(
@@ -136,7 +170,12 @@ class Trainer(StateDictMixin):
     
         num_workers = cfg.training.num_workers_data_loaders
         use_manager = cfg.training.cache_in_ram and (num_workers > 0)
-        p = Path(cfg.static_dataset.path) if self._is_static_dataset else Path("dataset")
+        if self._is_static_dataset:
+            resolved_static_path = _resolve_path(cfg.static_dataset.path)
+            assert resolved_static_path is not None
+            p = resolved_static_path
+        else:
+            p = Path("dataset")
         self.train_dataset = Dataset(p / "train", dataset_full_res, "train_dataset", cfg.training.cache_in_ram, use_manager)
         self.test_dataset = Dataset(p / "test", dataset_full_res, "test_dataset", cache_in_ram=True)
         self.train_dataset.load_from_default_path()
@@ -191,11 +230,14 @@ class Trainer(StateDictMixin):
         def get_sample_weights(sample_weights: List[float]) -> Optional[List[float]]:
             return None if (self._is_static_dataset and cfg.static_dataset.ignore_sample_weights) else sample_weights
 
-        c = cfg.denoiser.training
-        seq_length = cfg.agent.denoiser.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
-        bs = make_batch_sampler(c.batch_size, seq_length, get_sample_weights(c.sample_weights))
-        dl_denoiser_train = make_data_loader(batch_sampler=bs)
-        dl_denoiser_test = DatasetTraverser(self.test_dataset, c.batch_size, seq_length)
+        if self.agent.denoiser is not None:
+            c = cfg.denoiser.training
+            seq_length = cfg.agent.denoiser.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
+            bs = make_batch_sampler(c.batch_size, seq_length, get_sample_weights(c.sample_weights))
+            dl_denoiser_train = make_data_loader(batch_sampler=bs)
+            dl_denoiser_test = DatasetTraverser(self.test_dataset, c.batch_size, seq_length)
+        else:
+            dl_denoiser_train = dl_denoiser_test = None
 
         if self.agent.upsampler is not None:
             c = cfg.upsampler.training
@@ -214,8 +256,14 @@ class Trainer(StateDictMixin):
         else:
             dl_rew_end_model_train = dl_rew_end_model_test = None
 
-        self._data_loader_train = CommonTools(dl_denoiser_train, dl_upsampler_train, dl_rew_end_model_train, None)
-        self._data_loader_test = CommonTools(dl_denoiser_test, dl_upsampler_test, dl_rew_end_model_test, None)
+        self._data_loader_train = CommonTools(
+            denoiser=dl_denoiser_train, upsampler=dl_upsampler_train,
+            rew_end_model=dl_rew_end_model_train, actor_critic=None,
+        )
+        self._data_loader_test = CommonTools(
+            denoiser=dl_denoiser_test, upsampler=dl_upsampler_test,
+            rew_end_model=dl_rew_end_model_test, actor_critic=None,
+        )
 
         # RL env
 
@@ -244,7 +292,7 @@ class Trainer(StateDictMixin):
             rl_env = None
 
         # Setup training
-        sigma_distribution_cfg = instantiate(cfg.denoiser.sigma_distribution)
+        sigma_distribution_cfg = instantiate(cfg.denoiser.sigma_distribution) if self.agent.denoiser is not None else None
         sigma_distribution_cfg_upsampler = instantiate(cfg.upsampler.sigma_distribution) if self.agent.upsampler is not None else None
         self.agent.setup_training(sigma_distribution_cfg, sigma_distribution_cfg_upsampler, actor_critic_loss_cfg, rl_env)
 
@@ -252,8 +300,8 @@ class Trainer(StateDictMixin):
         self.epoch = 0
         self.num_epochs_collect = None
         self.num_episodes_test = 0
-        self.num_batch_train = CommonTools(0, 0, 0)
-        self.num_batch_test = CommonTools(0, 0, 0)
+        self.num_batch_train = CommonTools(denoiser=0, upsampler=0, rew_end_model=0)
+        self.num_batch_test = CommonTools(denoiser=0, upsampler=0, rew_end_model=0)
 
         if cfg.common.resume:
             self.load_state_checkpoint()
@@ -415,6 +463,8 @@ class Trainer(StateDictMixin):
         opt = self.opt.get(name)
         lr_sched = self.lr_sched.get(name)
         data_loader = self._data_loader_train.get(name)
+        debug_step_logs = bool(getattr(self._cfg.training, "debug_step_logs", False))
+        debug_every = int(getattr(self._cfg.training, "debug_log_every_n_steps", 1))
 
         torch.cuda.empty_cache()
         model.to(self._device)
@@ -467,6 +517,16 @@ class Trainer(StateDictMixin):
 
             to_log.append(metrics)
 
+            if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
+                shape_obs = tuple(batch.obs.shape) if batch is not None else None
+                shape_act = tuple(batch.act.shape) if (batch is not None and batch.act is not None) else None
+                numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
+                print(
+                    f"[debug][train][{name}] epoch={self.epoch} step={i + 1}/{num_steps} "
+                    f"loss={loss.item():.6f} obs_shape={shape_obs} act_shape={shape_act} "
+                    f"metrics={numeric_metrics}"
+                )
+
         process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
         to_log = [{f"{name}/train/{k}": v for k, v in d.items()} for d in to_log]
 
@@ -480,6 +540,8 @@ class Trainer(StateDictMixin):
         model = getattr(self.agent, name)
         data_loader = self._data_loader_test.get(name)
         max_batches = getattr(self._cfg.evaluation, "max_test_batches", None)
+        debug_step_logs = bool(getattr(self._cfg.training, "debug_step_logs", False))
+        debug_every = int(getattr(self._cfg.training, "debug_log_every_n_steps", 1))
         model.eval()
         model.to(self._device)
         raw_metrics = []
@@ -492,6 +554,15 @@ class Trainer(StateDictMixin):
             metrics[f"num_batch_test_{name}"] = num_batch
             self.num_batch_test.set(name, num_batch + 1)
             raw_metrics.append(metrics)
+
+            if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
+                shape_obs = tuple(batch.obs.shape)
+                shape_act = tuple(batch.act.shape) if batch.act is not None else None
+                numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
+                print(
+                    f"[debug][test][{name}] epoch={self.epoch} batch={i + 1} "
+                    f"obs_shape={shape_obs} act_shape={shape_act} metrics={numeric_metrics}"
+                )
 
         process_confusion_matrices_if_any_and_compute_classification_metrics(raw_metrics)
 
@@ -512,17 +583,22 @@ class Trainer(StateDictMixin):
         cfg = self._cfg
         num_samples = cfg.evaluation.num_inference_samples
         num_gen_steps = cfg.evaluation.num_inference_steps
+        up_mode = "bilinear" if self._device.type == "mps" else "bicubic"
 
         denoiser = self.agent.denoiser
         upsampler = self.agent.upsampler
 
-        denoiser.eval().to(self._device)
+        if denoiser is not None:
+            denoiser.eval().to(self._device)
         if upsampler is not None:
             upsampler.eval().to(self._device)
 
-        sampler_next_obs = DiffusionSampler(
-            denoiser, instantiate(cfg.world_model_env.diffusion_sampler_next_obs),
-        )
+        sampler_next_obs = None
+        if denoiser is not None:
+            sampler_next_obs = DiffusionSampler(
+                denoiser, instantiate(cfg.world_model_env.diffusion_sampler_next_obs),
+            )
+
         sampler_up = None
         if upsampler is not None:
             sampler_up = DiffusionSampler(
@@ -531,12 +607,44 @@ class Trainer(StateDictMixin):
             n_cond_up = cfg.agent.upsampler.inner_model.num_steps_conditioning
             up_factor = upsampler.cfg.upsampling_factor
 
-        n_cond = cfg.agent.denoiser.inner_model.num_steps_conditioning
+        if denoiser is not None:
+            n_cond = cfg.agent.denoiser.inner_model.num_steps_conditioning
+        elif upsampler is not None:
+            n_cond = n_cond_up
+        else:
+            return []
+
         seq_length = n_cond + 1 + num_gen_steps
         traverser = DatasetTraverser(self.test_dataset, 1, seq_length)
 
         to_log = []
         sample_count = 0
+
+        def frame_to_uint8(t):
+            return t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu()
+
+        def to_grayscale_or_rgb(t):
+            img = frame_to_uint8(t)
+            if img.shape[0] == 1:
+                img = img.expand(3, -1, -1)
+            elif img.shape[0] >= 4:
+                img = img[:3]
+            return img.permute(1, 2, 0).numpy()
+
+        def make_grid(row_pairs):
+            h, w, _ = row_pairs[0][0].shape
+            gap = 2
+            n_cols = len(row_pairs[0])
+            n_rows = len(row_pairs)
+            grid_w = n_cols * w + (n_cols - 1) * gap
+            grid_h = n_rows * h + (n_rows - 1) * gap
+            grid = np.full((grid_h, grid_w, 3), 128, dtype=np.uint8)
+            for r, row in enumerate(row_pairs):
+                y = r * (h + gap)
+                for c_idx, img in enumerate(row):
+                    x = c_idx * (w + gap)
+                    grid[y:y + h, x:x + w] = img
+            return grid
 
         for batch in traverser:
             if sample_count >= num_samples:
@@ -559,20 +667,64 @@ class Trainer(StateDictMixin):
                 if obs_hr.ndim == 4:
                     obs_hr = obs_hr.unsqueeze(0)
 
+            # Upsampler-only mode: run upsampler on each LR slice
+            if sampler_next_obs is None and sampler_up is not None and has_hr:
+                b, t, c, h, w = obs_lr.shape
+                vis_count = min(6, t)
+                vis_idx = [int(i) for i in torch.linspace(0, t - 1, vis_count).long()]
+
+                gen_hr_frames = []
+                for i in vis_idx:
+                    context_start = max(0, i - n_cond_up)
+                    context_end = i
+                    context_slices = obs_lr[:, context_start:context_end]
+                    if context_slices.size(1) < n_cond_up:
+                        pad = n_cond_up - context_slices.size(1)
+                        context_slices = F.pad(context_slices, [0, 0, 0, 0, 0, 0, pad, 0])
+                    low_up = F.interpolate(
+                        obs_lr[:, i], scale_factor=up_factor, mode=up_mode,
+                    ).unsqueeze(1)
+                    context_hr = F.interpolate(
+                        context_slices.reshape(-1, c, h, w), scale_factor=up_factor, mode=up_mode,
+                    ).reshape(1, n_cond_up, c, up_factor * h, up_factor * w)
+                    prev = torch.cat((context_hr, low_up), dim=1)
+                    sr_frame, _ = sampler_up.sample(prev, None)
+                    gen_hr_frames.append(sr_frame[0])
+
+                gt_imgs = [to_grayscale_or_rgb(obs_hr[0, i]) for i in vis_idx]
+                gen_imgs = [to_grayscale_or_rgb(f) for f in gen_hr_frames]
+                lr_imgs = [to_grayscale_or_rgb(
+                    F.interpolate(obs_lr[:, i], scale_factor=up_factor, mode=up_mode)[0]
+                ) for i in vis_idx]
+
+                grid = make_grid([gt_imgs, gen_imgs, lr_imgs])
+                frame_labels = ", ".join(str(i) for i in vis_idx)
+                to_log.append({
+                    f"inference/sample_{sample_count}": wandb.Image(
+                        grid, caption=f"Top: GT HR | Mid: Generated HR | Bottom: Bicubic LR | slices: {frame_labels}",
+                    ),
+                })
+                sample_count += 1
+                continue
+
+            # Legacy denoiser + upsampler autoregressive mode
+            if sampler_next_obs is None:
+                continue
+
             n_valid = mask.sum().item()
             n_gen = min(num_gen_steps, n_valid - n_cond)
             if n_gen <= 0:
                 continue
 
             obs_buf = obs_lr[:, :n_cond].clone()
-            act_buf = act[:, :n_cond].clone()
+            act_buf = act[:, :n_cond].clone() if act is not None else None
             gen_lr = list(obs_buf[0])
 
             if sampler_up is not None and has_hr:
                 obs_hr_buf = obs_hr[:, :n_cond].clone()
-                gen_hr = list(obs_hr_buf[0])
+                gen_hr_list = list(obs_hr_buf[0])
             else:
-                gen_hr = None
+                gen_hr_list = None
 
             for step in range(n_gen):
                 next_lr, _ = sampler_next_obs.sample(obs_buf, act_buf)
@@ -580,96 +732,51 @@ class Trainer(StateDictMixin):
 
                 if sampler_up is not None and has_hr:
                     low_up = F.interpolate(
-                        next_lr, scale_factor=up_factor, mode="bicubic",
+                        next_lr, scale_factor=up_factor, mode=up_mode,
                     ).unsqueeze(1)
                     next_hr, _ = sampler_up.sample(
                         torch.cat((obs_hr_buf[:, -n_cond_up:], low_up), dim=1), None,
                     )
-                    gen_hr.append(next_hr[0])
+                    gen_hr_list.append(next_hr[0])
                     obs_hr_buf = obs_hr_buf.roll(-1, dims=1)
                     obs_hr_buf[:, -1] = next_hr
 
                 obs_buf = obs_buf.roll(-1, dims=1)
-                act_buf = act_buf.roll(-1, dims=1)
                 obs_buf[:, -1] = next_lr
-                t_idx = n_cond + step
-                if t_idx < act.size(1):
-                    act_buf[:, -1] = act[:, t_idx]
-
-            def frame_to_uint8(t):
-                return t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu()
-
-            def to_rgb(t):
-                img = frame_to_uint8(t)
-                if img.shape[0] >= 4:
-                    img = img[:3]
-                return img.permute(1, 2, 0).numpy()
-
-            def to_depth_colorized(t):
-                img = frame_to_uint8(t)
-                if img.shape[0] < 4:
-                    return None
-                depth_u8 = img[3].numpy()
-                return colorize_inverse_depth_uint8(depth_u8)
+                if act_buf is not None:
+                    act_buf = act_buf.roll(-1, dims=1)
+                    t_idx = n_cond + step
+                    if t_idx < act.size(1):
+                        act_buf[:, -1] = act[:, t_idx]
 
             total = len(gen_lr)
             vis_idx = sorted(set([
-                n_cond - 1,
-                n_cond,
+                n_cond - 1, n_cond,
                 n_cond + max(1, n_gen // 4),
                 n_cond + n_gen // 2,
-                n_cond + 3 * n_gen // 4,
                 total - 1,
             ]))
             vis_idx = [i for i in vis_idx if i < total and i < obs_lr.size(1)]
 
-            if gen_hr is not None:
-                src_gt, src_gen, res_label = obs_hr[0], gen_hr, "HR"
+            if gen_hr_list is not None:
+                src_gt, src_gen, res_label = obs_hr[0], gen_hr_list, "HR"
             else:
                 src_gt, src_gen, res_label = obs_lr[0], gen_lr, "LR"
 
-            gt_rgb = [to_rgb(src_gt[i]) for i in vis_idx]
-            gen_rgb = [to_rgb(src_gen[i]) for i in vis_idx]
-
-            has_depth_ch = src_gt[0].shape[0] >= 4
-            gt_depth = [to_depth_colorized(src_gt[i]) for i in vis_idx] if has_depth_ch else None
-            gen_depth = [to_depth_colorized(src_gen[i]) for i in vis_idx] if has_depth_ch else None
-
-            def make_grid(row_pairs):
-                h, w, _ = row_pairs[0][0].shape
-                gap = 2
-                n_cols = len(row_pairs[0])
-                n_rows = len(row_pairs)
-                grid_w = n_cols * w + (n_cols - 1) * gap
-                grid_h = n_rows * h + (n_rows - 1) * gap
-                grid = np.full((grid_h, grid_w, 3), 128, dtype=np.uint8)
-                for r, row in enumerate(row_pairs):
-                    y = r * (h + gap)
-                    for c, img in enumerate(row):
-                        x = c * (w + gap)
-                        grid[y:y + h, x:x + w] = img
-                return grid
+            gt_rgb = [to_grayscale_or_rgb(src_gt[i]) for i in vis_idx]
+            gen_rgb = [to_grayscale_or_rgb(src_gen[i]) for i in vis_idx]
 
             frame_labels = ", ".join(str(i) for i in vis_idx)
-
-            rgb_grid = make_grid([gt_rgb, gen_rgb])
+            grid = make_grid([gt_rgb, gen_rgb])
             to_log.append({
-                f"inference/sample_{sample_count}_rgb": wandb.Image(
-                    rgb_grid, caption=f"RGB ({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
+                f"inference/sample_{sample_count}": wandb.Image(
+                    grid, caption=f"({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
                 ),
             })
-
-            if gt_depth is not None and gen_depth is not None:
-                depth_grid = make_grid([gt_depth, gen_depth])
-                to_log.append({
-                    f"inference/sample_{sample_count}_depth": wandb.Image(
-                        depth_grid, caption=f"Depth ({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
-                    ),
-                })
-
             sample_count += 1
 
-        denoiser.to("cpu")
+        if denoiser is not None:
+            denoiser.to("cpu")
         if upsampler is not None:
             upsampler.to("cpu")
 

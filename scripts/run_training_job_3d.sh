@@ -5,7 +5,7 @@ set -euo pipefail
 # - OUTPUT_URI: gs://.../runs/<run_id>
 # - PREPROCESSED_DATA_URI: gs://... prefix containing already-processed dataset (low_res/full_res)
 # Optional:
-# - RUN_NAME, CONFIG_NAME, TRAIN_OVERRIDES
+# - RUN_NAME, TRAIN_3D_ARGS (extra CLI args for train_3d.py)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -13,17 +13,16 @@ cd "${ROOT_DIR}"
 : "${OUTPUT_URI:?OUTPUT_URI is required}"
 : "${PREPROCESSED_DATA_URI:?PREPROCESSED_DATA_URI is required}"
 
-RUN_NAME="${RUN_NAME:-vertex-run-$(date +%Y%m%d-%H%M%S)}"
-CONFIG_NAME="${CONFIG_NAME:-trainer_mri}"
-TRAIN_OVERRIDES="${TRAIN_OVERRIDES:-}"
+RUN_NAME="${RUN_NAME:-vertex-3d-$(date +%Y%m%d-%H%M%S)}"
+TRAIN_3D_ARGS="${TRAIN_3D_ARGS:-}"
 GCP_PROJECT="${GCP_PROJECT:-}"
 CKPT_UPLOAD_POLL_SECONDS="${CKPT_UPLOAD_POLL_SECONDS:-30}"
 
 WORK_ROOT="${WORK_ROOT:-/tmp/diamond_vertex}"
 PROCESSED_DIR="${WORK_ROOT}/processed_data"
-RUN_DIR="${WORK_ROOT}/run"
+SAVE_DIR="${WORK_ROOT}/checkpoints_3d"
 
-mkdir -p "${WORK_ROOT}"
+mkdir -p "${WORK_ROOT}" "${SAVE_DIR}"
 PROJECT_ARGS=()
 if [[ -n "${GCP_PROJECT}" ]]; then
   PROJECT_ARGS=(--project "${GCP_PROJECT}")
@@ -84,37 +83,8 @@ for blob in client.list_blobs(bucket_name, prefix=prefix + "/"):
 print(f"Downloaded {downloaded} files into {dst_root}")
 PY
 
-mkdir -p "${RUN_DIR}"
-HYDRA_RUN_DIR="${RUN_DIR}/hydra/${RUN_NAME}"
-mkdir -p "${HYDRA_RUN_DIR}"
-cat > "${RUN_DIR}/run_metadata.json" <<EOF
-{
-  "run_name": "${RUN_NAME}",
-  "preprocessed_data_uri": "${PREPROCESSED_DATA_URI}",
-  "output_uri": "${OUTPUT_URI}"
-}
-EOF
-
-INIT_CKPT_LOCAL=""
-if [[ -n "${INIT_CHECKPOINT_URI:-}" ]]; then
-  INIT_CKPT_LOCAL="${WORK_ROOT}/init_checkpoint.pt"
-  echo "Downloading init checkpoint ${INIT_CHECKPOINT_URI} -> ${INIT_CKPT_LOCAL}"
-  python - "${INIT_CHECKPOINT_URI}" "${INIT_CKPT_LOCAL}" <<'PY'
-import sys, os
-from google.cloud import storage
-
-src, dst = sys.argv[1], sys.argv[2]
-bucket = src[len("gs://"):].split("/", 1)[0]
-blob = src[len("gs://") + len(bucket) + 1:]
-client = storage.Client(project=os.environ.get("GCP_PROJECT") or None)
-client.bucket(bucket).blob(blob).download_to_filename(dst)
-print(f"Downloaded checkpoint to {dst}")
-PY
-fi
-
-echo "Starting training run ${RUN_NAME}"
-CHECKPOINTS_DIR="${HYDRA_RUN_DIR}/checkpoints"
-CHECKPOINTS_DST_PREFIX="${OUTPUT_URI}/training_run/hydra/${RUN_NAME}/checkpoints"
+echo "Starting 3D training run ${RUN_NAME}"
+CHECKPOINTS_DST_PREFIX="${OUTPUT_URI}/checkpoints_3d"
 LAST_CKPT_SNAPSHOT=""
 
 compute_checkpoint_snapshot() {
@@ -142,29 +112,23 @@ PY
 
 sync_checkpoints_if_changed() {
   local snap
-  snap="$(compute_checkpoint_snapshot "${CHECKPOINTS_DIR}")"
+  snap="$(compute_checkpoint_snapshot "${SAVE_DIR}")"
   if [[ "${snap}" != "${LAST_CKPT_SNAPSHOT}" ]]; then
     if [[ "${snap}" != "missing" ]]; then
-      echo "Checkpoint change detected; uploading ${CHECKPOINTS_DIR} -> ${CHECKPOINTS_DST_PREFIX}"
-      python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${CHECKPOINTS_DIR}" --dst-prefix "${CHECKPOINTS_DST_PREFIX}"
+      echo "Checkpoint change detected; uploading ${SAVE_DIR} -> ${CHECKPOINTS_DST_PREFIX}"
+      python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${SAVE_DIR}" --dst-prefix "${CHECKPOINTS_DST_PREFIX}"
     fi
     LAST_CKPT_SNAPSHOT="${snap}"
   fi
 }
 
-INIT_CKPT_OVERRIDE=""
-if [[ -n "${INIT_CKPT_LOCAL}" ]]; then
-  INIT_CKPT_OVERRIDE="initialization.path_to_ckpt=${INIT_CKPT_LOCAL}"
-fi
-
-python src/main.py \
-  --config-name "${CONFIG_NAME}" \
-  "env.path_data_low_res=${PROCESSED_DIR}/low_res" \
-  "env.path_data_full_res=${PROCESSED_DIR}/full_res" \
-  "wandb.name=${RUN_NAME}" \
-  "hydra.run.dir=${HYDRA_RUN_DIR}" \
-  ${INIT_CKPT_OVERRIDE} \
-  ${TRAIN_OVERRIDES} &
+python src/train_3d.py \
+  --lr-train "${PROCESSED_DIR}/low_res/train" \
+  --hr-train "${PROCESSED_DIR}/full_res/train" \
+  --save-dir "${SAVE_DIR}" \
+  --wandb-project mri-super-resolution-3d \
+  --wandb-name "${RUN_NAME}" \
+  ${TRAIN_3D_ARGS} &
 TRAIN_PID=$!
 
 while kill -0 "${TRAIN_PID}" 2>/dev/null; do
@@ -176,7 +140,6 @@ wait "${TRAIN_PID}"
 sync_checkpoints_if_changed
 
 echo "Uploading run outputs to ${OUTPUT_URI}"
-python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${RUN_DIR}" --dst-prefix "${OUTPUT_URI}/training_run"
-python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${PROCESSED_DIR}" --dst-prefix "${OUTPUT_URI}/processed_data"
+python scripts/gcs_data_ops.py "${PROJECT_ARGS[@]}" upload-dir --src-dir "${SAVE_DIR}" --dst-prefix "${CHECKPOINTS_DST_PREFIX}"
 
-echo "Run complete: ${RUN_NAME}"
+echo "3D run complete: ${RUN_NAME}"

@@ -1,0 +1,95 @@
+defaults:
+  - _self_
+  - env: mri
+  - agent: mri
+  - world_model_env: fast
+
+hydra:
+  job:
+    chdir: True
+
+wandb:
+  mode: online
+  project: mri-super-resolution
+  entity: null
+  name: null
+  group: null
+  tags: null
+  notes: null
+  heartbeat_interval_seconds: 60
+
+initialization:
+  path_to_ckpt: null
+  load_denoiser: True
+  load_rew_end_model: True
+  load_actor_critic: True
+
+common:
+  devices: 0
+  seed: null
+  resume: False
+
+checkpointing:
+  save_agent_every: 5
+  num_to_keep: 11
+
+collection:
+  train:
+    num_envs: 1
+    epsilon: 0.01
+    num_steps_total: 0
+    first_epoch:
+      min: 0
+      max: 0
+      threshold_rew: 10
+    steps_per_epoch: 0
+  test:
+    num_envs: 1
+    num_episodes: 0
+    epsilon: 0.0
+    num_final_episodes: 0
+
+static_dataset:
+  path: ${env.path_data_low_res}
+  ignore_sample_weights: True
+
+training:
+  should: True
+  num_final_epochs: 600
+  cache_in_ram: False
+  num_workers_data_loaders: 4
+  model_free: False
+  compile_wm: False
+  debug_step_logs: False
+  debug_log_every_n_steps: 10
+
+evaluation:
+  should: True
+  every: 20
+  max_test_batches: 50
+  num_inference_samples: 3
+  num_inference_steps: 20
+
+upsampler:
+  training:
+    num_autoregressive_steps: 1
+    start_after_epochs: 0
+    steps_first_epoch: 400
+    steps_per_epoch: 400
+    sample_weights: null
+    batch_size: 8
+    grad_acc_steps: 4
+    lr_warmup_steps: 100
+    max_grad_norm: 10.0
+
+  optimizer:
+    lr: 1e-4
+    weight_decay: 1e-2
+    eps: 1e-8
+
+  sigma_distribution:
+    _target_: models.diffusion.SigmaDistributionConfig
+    loc: -1.2
+    scale: 1.2
+    sigma_min: 2e-3
+    sigma_max: 20

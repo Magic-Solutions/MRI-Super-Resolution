@@ -1,182 +1,112 @@
-# Diffusion for World Modeling: Visual Details Matter in Atari (NeurIPS 2024 Spotlight)
+# MRI Super-Resolution via Elucidated Diffusion Models
 
-This branch contains the code to play (and train) our world model of *Counter-Strike: Global Offensive* (CS:GO).
+Comparative analysis of **3D convolutional** and **2.5D slice-conditioned** U-Net architectures for brain MRI super-resolution using the Elucidated Diffusion Model (EDM) framework.
 
-🌍 [Project Page](https://diamond-wm.github.io) • 🤓 [Paper](https://arxiv.org/pdf/2405.12399) • 𝕏 [Atari thread](https://x.com/EloiAlonso1/status/1793916382779982120) • 𝕏 [CSGO thread](https://x.com/EloiAlonso1/status/1844803606064611771) • 💬 [Discord](https://discord.gg/74vha5RWPg)
+**Pretrained Weights:** [HuggingFace](https://huggingface.co/Chichonnade/Comparative-Analysis-3D-2.5D-MRI-Super-Resolution-EDM)
+**Dataset:** [FOMO60K / NKI cohort](https://huggingface.co/datasets/FOMO-MRI/FOMO60K)
 
-<div align='center'>
-  Human player in CSGO world model (full quality video <a href="https://diamond-wm.github.io/static/videos/grid.mp4">here</a>)
-  <br>
-  <img alt="DIAMOND agent in WM" src="https://github.com/user-attachments/assets/dcbdd523-ca22-46a9-bb7d-bcc52080fe00">
-</div>
+## Results
 
-## Installation
-```bash
-git clone https://github.com/eloialonso/diamond.git
-cd diamond
-git checkout csgo
-conda create -n diamond python=3.10
-conda activate diamond
-pip install -r requirements.txt
-python src/play.py
-```
+| Method | PSNR (dB) | SSIM | Params |
+|---|---|---|---|
+| Bicubic interpolation | 31.01 | 0.952 | -- |
+| Trilinear interpolation | 33.85 | 0.988 | -- |
+| 2.5D EDM (ours, 10 ep) | 33.68 | 0.967 | 51.1M |
+| **3D EDM (ours, 10 ep)** | **37.77** | **0.996** | 50.7M |
 
-> Note on Apple Silicon you must enable CPU fallback for [MPS backend](https://pytorch.org/docs/stable/notes/mps.html) with
-> `PYTORCH_ENABLE_MPS_FALLBACK=1 python src/play.py`
+Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x super-resolution.
 
-The final command will automatically download our trained CSGO diffusion world model from the [HuggingFace Hub 🤗](https://huggingface.co/eloialonso/diamond/tree/main) along with spawn points and human player actions. Note that the model weights require 1.5GB of disk space.
+## Architecture
 
-When the download is complete, control actions will be printed in the terminal. Press Enter to start playing.
+Both models use the EDM framework (Karras et al. 2022) adapted from DIAMOND:
 
-The default [fast config](config/world_model_env/fast.yaml) runs best on a machine with a CUDA GPU, but can also be run on CPU at reduced fps. The model also runs faster if compiled (but takes longer at startup).
-```bash
-python src/play.py --compile
-```
+- **3D EDM**: Full 3D convolutional U-Net with channels [32, 64, 128, 256], 3D self-attention at the deepest level, patch-based training (32^3) and sliding-window inference with overlap blending. 20-step Euler sampling.
+- **2.5D EDM**: 2D U-Net with channels [64, 64, 128, 256], conditions on 1 adjacent slice for inter-slice context. Single-step Heun sampling (0.09s/slice).
 
-To reproduce our videos, you can change the [trainer](config/trainer.yaml#L5) file to use the [higher_quality](config/world_model_env/higher_quality.yaml) config (instead of the [fast](config/world_model_env/fast.yaml) config) with increased denoising steps to enable higher quality generation at reduced speed (10fps on a RTX 3090 on our machine).
+## Quick Start
 
-To adjust the sampling parameters yourself (number of denoising steps, stochasticity, order, etc) of the trained diffusion world model, for instance to trade off sampling speed and quality, edit the file `config/world_model_env/fast.yaml`.
-
-## Training
-
-**IMPORTANT**: Any issue related to the download of training data should be reported on the [dataset repo](https://github.com/TeaPearce/Counter-Strike_Behavioural_Cloning).
-
-We trained on the biggest dataset of the repo (`dataset_dm_scraped_dust2`), that corresponds to 5.5M frames, 95h of gameplay, and takes ~660Gb of disk space.
-
-- We used a random test split of 500 episodes of 1000 steps (specified in [test_split.txt](test_split.txt)).
-- We used the remaining 5003 episodes to train the model. This corresponds to 5M frames, or 87h of gameplay.
-
-To get the data ready for training on your machine:
-- **Step 1**: Download the `.tar` files from the `dataset_dm_scraped_dust2_tars` on the [OneDrive link](https://1drv.ms/u/s!AjG1JlThUkPgh1JEIxETxvaphzgC?e=2AJfA3) from the [dataset repo](https://github.com/TeaPearce/Counter-Strike_Behavioural_Cloning). 
-- **Step 2**: Use our [script](src/process_csgo_tar_files.py) to prepare the downloaded data for training, as follows:
+### Install
 
 ```bash
-python src/process_csgo_tar_files.py <folder_with_tar_files_from_step_one> <folder_to_store_processed_data>
+pip install -e .
 ```
 
-Then edit [config/env/csgo.yaml](config/env/csgo.yaml) and set:
-- `path_data_low_res` to `<folder_to_store_processed_data>/low_res`
-- `path_data_full_res` to `<folder_to_store_processed_data>/full_res`
-
-You can then launch a training run with `python src/main.py`.
-
-The provided configuration took 12 days on a RTX 4090.
-
-## Vertex AI custom-job training
-
-This fork includes a managed training flow for Google Cloud Vertex AI Custom Jobs with:
-- local sample-data preview before launch,
-- recording-level selection from GCS (`--recording-uri`, `--manifest`, or prefix listing),
-- service-account-based access (no runtime `gcloud auth` call),
-- W&B metric tracking and GCS artifact upload.
-
-### 1) Provision runtime infra with Pulumi
-
-Use the stack in `infra/pulumi-gcp` to provision:
-- runtime service account,
-- bucket IAM access,
-- Artifact Registry repository,
-- Secret Manager access for `WANDB_API_KEY`,
-- default Vertex worker spec (single A100 by default).
-
-### 2) Build and push the training image
+### Preprocess data
 
 ```bash
-docker build -f Dockerfile.vertex -t REGION-docker.pkg.dev/PROJECT/REPO/diamond-train:latest .
-docker push REGION-docker.pkg.dev/PROJECT/REPO/diamond-train:latest
+python src/raw_data/scripts/main.py src/processed_data_mri src/raw_data/FOMO60K/PT015_NKI \
+  --mode 2d --axis sagittal --scale-factor 2
 ```
 
-### 3) Launch with preview + confirmation
+### Train 2.5D model (local)
 
 ```bash
-pip install -r requirements-preview.txt
-
-python scripts/launch_vertex_training.py \
-  --recording-uri train=gs://INPUT_BUCKET/path/to/file_a.mkv \
-  --recording-uri test=gs://INPUT_BUCKET/path/to/file_b.mkv
+python src/main.py --config-name trainer_mri \
+  common.devices=cpu \
+  training.num_final_epochs=10 \
+  upsampler.training.batch_size=4 \
+  upsampler.training.grad_acc_steps=8
 ```
 
-The launcher auto-loads defaults from `infra/pulumi-gcp` (`project`, `region`, `service account`, artifact bucket, and image base). Override any of them explicitly with CLI flags if needed.
-
-Useful run-duration flags:
-- `--smoke-test` (uses `trainer_smoke`)
-- `--epochs <N>`
-- `--steps-per-epoch <N>` (applies to denoiser + upsampler)
-- `--denoiser-steps-per-epoch <N>`
-- `--upsampler-steps-per-epoch <N>`
-- `--eval-every <N>`
-
-Image workflow flag:
-- `--push-latest` uses Cloud Build (`gcloud builds submit --file Dockerfile.vertex`) to build and push the resolved `:latest` image before preview/submit.
-
-Depth preprocessing is fixed to clip mm depth to `[200, 3000]` and map to `uint8` by default. Override with `--depth-min-mm` / `--depth-max-mm` if needed.
-
-### 4) Typical launch examples
-
-Smoke test on one recording (skip preview for speed):
+### Train on Vertex AI (cloud)
 
 ```bash
 python scripts/launch_vertex_training.py \
-  --recording-uri train=gs://omgrab-our-exports/om002/cookie_openhand.mkv \
-  --smoke-test \
-  --skip-preview
+  --preprocessed-data-uri gs://your-bucket/processed_data_mri \
+  --project your-project --region us-central1 \
+  --service-account your-sa@project.iam.gserviceaccount.com \
+  --image-uri your-image-uri \
+  --artifact-bucket-uri gs://your-bucket/diamond \
+  --epochs 10 --push-latest --yes
 ```
 
-Full run with preview gate and explicit train/test recordings:
+For 3D training, add `--mode 3d`.
+
+### Run inference
 
 ```bash
-python scripts/launch_vertex_training.py \
-  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
-  --recording-uri test=gs://INPUT_BUCKET/path/to/test_clip.mkv
+# 2.5D inference from a cloud run
+python scripts/run_inference_from_bucket.py run-YYYYMMDD-HHMMSS --evaluate
+
+# 3D inference (local)
+PYTORCH_ENABLE_MPS_FALLBACK=1 python scripts/run_inference_3d.py \
+  --checkpoint path/to/model_final.pt --num-samples 6 --num-steps 20
 ```
 
-Run with shorter training duration overrides:
+### Evaluate
 
 ```bash
-python scripts/launch_vertex_training.py \
-  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
-  --epochs 10 \
-  --steps-per-epoch 50 \
-  --eval-every 1
+python scripts/evaluate_25d.py \
+  --checkpoint path/to/agent_epoch_00010.pt --num-steps 1
 ```
 
-Rebuild/push latest image before submit:
+## Project Structure
 
-```bash
-python scripts/launch_vertex_training.py \
-  --recording-uri train=gs://INPUT_BUCKET/path/to/train_clip.mkv \
-  --push-latest \
-  --skip-preview
+```
+config/              Hydra configs (trainer_mri.yaml, agent/mri.yaml, env/mri.yaml)
+scripts/             Training launchers, inference, evaluation
+src/
+  main.py            2.5D training entry point (Hydra)
+  train_3d.py        3D training entry point (argparse)
+  trainer.py         Core training loop
+  models/
+    diffusion/       EDM denoiser (2D + 3D variants)
+    blocks.py        2D UNet building blocks
+    blocks3d.py      3D UNet building blocks
+  data/
+    dataset.py       2D slice dataset
+    dataset_3d.py    3D patch/volume dataset
+  metrics.py         PSNR and SSIM implementations
 ```
 
-Use a manifest file for many recordings:
+## Authors
 
-```bash
-python scripts/launch_vertex_training.py \
-  --manifest path/to/recordings_manifest.txt \
-  --skip-preview
-```
+- **Hendrik Chiche** -- University of California, Berkeley
+- **Ludovic Corcos**
+- **Logan Rouge** -- ISIMA, Clermont Auvergne INP
 
----
+In collaboration with GENCI.
 
-<a name="citation"></a>
-## [⬆️](#quick-links) Citation
+## License
 
-```text
-@inproceedings{alonso2024diffusionworldmodelingvisual,
-      title={Diffusion for World Modeling: Visual Details Matter in Atari},
-      author={Eloi Alonso and Adam Jelley and Vincent Micheli and Anssi Kanervisto and Amos Storkey and Tim Pearce and François Fleuret},
-      booktitle={Thirty-eighth Conference on Neural Information Processing Systems}}
-      year={2024},
-      url={https://arxiv.org/abs/2405.12399},
-}
-```
-
-<a name="credits"></a>
-## [⬆️](#quick_links) Credits
-
-- [https://github.com/crowsonkb/k-diffusion/](https://github.com/crowsonkb/k-diffusion/)
-- [https://github.com/huggingface/huggingface_hub](https://github.com/huggingface/huggingface_hub)
-- [https://github.com/google-research/rliable](https://github.com/google-research/rliable)
-- [https://github.com/pytorch/pytorch](https://github.com/pytorch/pytorch)
-- [https://github.com/TeaPearce/Counter-Strike_Behavioural_Cloning/](https://github.com/TeaPearce/Counter-Strike_Behavioural_Cloning/)
+This project adapts the [DIAMOND](https://github.com/eloialonso/diamond) codebase for MRI super-resolution.

@@ -13,6 +13,7 @@ tqdm==4.66.4
 wandb>=0.17.0
 av
 ffmpeg-python
+nibabel
 torchvision==0.19.1
 google-cloud-storage
 google-cloud-secret-manager

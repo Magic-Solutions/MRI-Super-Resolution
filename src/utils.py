@@ -83,7 +83,7 @@ class StateDictMixin:
 
 @dataclass
 class CommonTools(StateDictMixin):
-    denoiser: Any
+    denoiser: Optional[Any] = None
     upsampler: Optional[Any] = None
     rew_end_model: Optional[Any] = None
     actor_critic: Optional[Any] = None

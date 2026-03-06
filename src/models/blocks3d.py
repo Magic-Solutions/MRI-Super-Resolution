@@ -1,3 +1,5 @@
+"""3D variants of all UNet building blocks for volumetric MRI processing."""
+
 from functools import partial
 import math
 from typing import List, Optional
@@ -7,21 +9,15 @@ from torch import Tensor
 from torch import nn
 from torch.nn import functional as F
 
-# Settings for GroupNorm and Attention
-
 GN_GROUP_SIZE = 32
 GN_EPS = 1e-5
 ATTN_HEAD_DIM = 8
 
-# Convs
-
-Conv1x1 = partial(nn.Conv2d, kernel_size=1, stride=1, padding=0)
-Conv3x3 = partial(nn.Conv2d, kernel_size=3, stride=1, padding=1)
-
-# GroupNorm and conditional GroupNorm
+Conv1x1_3d = partial(nn.Conv3d, kernel_size=1, stride=1, padding=0)
+Conv3x3_3d = partial(nn.Conv3d, kernel_size=3, stride=1, padding=1)
 
 
-class GroupNorm(nn.Module):
+class GroupNorm3d(nn.Module):
     def __init__(self, in_channels: int) -> None:
         super().__init__()
         num_groups = max(1, in_channels // GN_GROUP_SIZE)
@@ -31,7 +27,7 @@ class GroupNorm(nn.Module):
         return self.norm(x)
 
 
-class AdaGroupNorm(nn.Module):
+class AdaGroupNorm3d(nn.Module):
     def __init__(self, in_channels: int, cond_channels: int) -> None:
         super().__init__()
         self.in_channels = in_channels
@@ -41,39 +37,33 @@ class AdaGroupNorm(nn.Module):
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
         assert x.size(1) == self.in_channels
         x = F.group_norm(x, self.num_groups, eps=GN_EPS)
-        scale, shift = self.linear(cond)[:, :, None, None].chunk(2, dim=1)
+        scale, shift = self.linear(cond)[:, :, None, None, None].chunk(2, dim=1)
         return x * (1 + scale) + shift
 
 
-# Self Attention
-
-
-class SelfAttention2d(nn.Module):
+class SelfAttention3d(nn.Module):
     def __init__(self, in_channels: int, head_dim: int = ATTN_HEAD_DIM) -> None:
         super().__init__()
         self.n_head = max(1, in_channels // head_dim)
         assert in_channels % self.n_head == 0
-        self.norm = GroupNorm(in_channels)
-        self.qkv_proj = Conv1x1(in_channels, in_channels * 3)
-        self.out_proj = Conv1x1(in_channels, in_channels)
+        self.norm = GroupNorm3d(in_channels)
+        self.qkv_proj = Conv1x1_3d(in_channels, in_channels * 3)
+        self.out_proj = Conv1x1_3d(in_channels, in_channels)
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
 
     def forward(self, x: Tensor) -> Tensor:
-        n, c, h, w = x.shape
-        x = self.norm(x)
-        qkv = self.qkv_proj(x)
-        qkv = qkv.view(n, self.n_head * 3, c // self.n_head, h * w).transpose(2, 3).contiguous()
-        q, k, v = [x for x in qkv.chunk(3, dim=1)]
+        n, c, d, h, w = x.shape
+        x_norm = self.norm(x)
+        qkv = self.qkv_proj(x_norm)
+        qkv = qkv.view(n, self.n_head * 3, c // self.n_head, d * h * w).transpose(2, 3).contiguous()
+        q, k, v = [t for t in qkv.chunk(3, dim=1)]
         y = F.scaled_dot_product_attention(q, k, v)
-        y = y.transpose(2, 3).reshape(n, c, h, w)
+        y = y.transpose(2, 3).reshape(n, c, d, h, w)
         return x + self.out_proj(y)
 
 
-# Embedding of the noise level
-
-
-class FourierFeatures(nn.Module):
+class FourierFeatures3d(nn.Module):
     def __init__(self, cond_channels: int) -> None:
         super().__init__()
         assert cond_channels % 2 == 0
@@ -85,55 +75,36 @@ class FourierFeatures(nn.Module):
         return torch.cat([f.cos(), f.sin()], dim=-1)
 
 
-# [Down|Up]sampling
-
-
-class Downsample(nn.Module):
+class Downsample3d(nn.Module):
     def __init__(self, in_channels: int) -> None:
         super().__init__()
-        self.conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
+        self.conv = nn.Conv3d(in_channels, in_channels, kernel_size=3, stride=2, padding=1)
         nn.init.orthogonal_(self.conv.weight)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.conv(x)
 
 
-class Upsample(nn.Module):
+class Upsample3d(nn.Module):
     def __init__(self, in_channels: int) -> None:
         super().__init__()
-        self.conv = Conv3x3(in_channels, in_channels)
+        self.conv = Conv3x3_3d(in_channels, in_channels)
 
     def forward(self, x: Tensor) -> Tensor:
         x = F.interpolate(x, scale_factor=2.0, mode="nearest")
         return self.conv(x)
 
 
-# Small Residual block
-
-
-class SmallResBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super().__init__()
-        self.f = nn.Sequential(GroupNorm(in_channels), nn.SiLU(inplace=True), Conv3x3(in_channels, out_channels))
-        self.skip_projection = nn.Identity() if in_channels == out_channels else Conv1x1(in_channels, out_channels)
-
-    def forward(self, x: Tensor) -> Tensor:
-        return self.skip_projection(x) + self.f(x)
-
-
-# Residual block (conditioning with AdaGroupNorm, no [down|up]sampling, optional self-attention)
-
-
-class ResBlock(nn.Module):
+class ResBlock3d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, cond_channels: int, attn: bool) -> None:
         super().__init__()
         should_proj = in_channels != out_channels
-        self.proj = Conv1x1(in_channels, out_channels) if should_proj else nn.Identity()
-        self.norm1 = AdaGroupNorm(in_channels, cond_channels)
-        self.conv1 = Conv3x3(in_channels, out_channels)
-        self.norm2 = AdaGroupNorm(out_channels, cond_channels)
-        self.conv2 = Conv3x3(out_channels, out_channels)
-        self.attn = SelfAttention2d(out_channels) if attn else nn.Identity()
+        self.proj = Conv1x1_3d(in_channels, out_channels) if should_proj else nn.Identity()
+        self.norm1 = AdaGroupNorm3d(in_channels, cond_channels)
+        self.conv1 = Conv3x3_3d(in_channels, out_channels)
+        self.norm2 = AdaGroupNorm3d(out_channels, cond_channels)
+        self.conv2 = Conv3x3_3d(out_channels, out_channels)
+        self.attn = SelfAttention3d(out_channels) if attn else nn.Identity()
         nn.init.zeros_(self.conv2.weight)
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
@@ -145,10 +116,7 @@ class ResBlock(nn.Module):
         return x
 
 
-# Sequence of residual blocks (in_channels -> mid_channels -> ... -> mid_channels -> out_channels)
-
-
-class ResBlocks(nn.Module):
+class ResBlocks3d(nn.Module):
     def __init__(
         self,
         list_in_channels: List[int],
@@ -161,7 +129,7 @@ class ResBlocks(nn.Module):
         self.in_channels = list_in_channels[0]
         self.resblocks = nn.ModuleList(
             [
-                ResBlock(in_ch, out_ch, cond_channels, attn)
+                ResBlock3d(in_ch, out_ch, cond_channels, attn)
                 for (in_ch, out_ch) in zip(list_in_channels, list_out_channels)
             ]
         )
@@ -175,31 +143,28 @@ class ResBlocks(nn.Module):
         return x, outputs
 
 
-# UNet
-
-
-class UNet(nn.Module):
+class UNet3d(nn.Module):
     def __init__(self, cond_channels: int, depths: List[int], channels: List[int], attn_depths: List[int]) -> None:
         super().__init__()
         assert len(depths) == len(channels) == len(attn_depths)
         self._num_down = len(channels) - 1
 
         d_blocks, u_blocks = [], []
-        for i, n in enumerate(depths):
+        for i, n_depth in enumerate(depths):
             c1 = channels[max(0, i - 1)]
             c2 = channels[i]
             d_blocks.append(
-                ResBlocks(
-                    list_in_channels=[c1] + [c2] * (n - 1),
-                    list_out_channels=[c2] * n,
+                ResBlocks3d(
+                    list_in_channels=[c1] + [c2] * (n_depth - 1),
+                    list_out_channels=[c2] * n_depth,
                     cond_channels=cond_channels,
                     attn=attn_depths[i],
                 )
             )
             u_blocks.append(
-                ResBlocks(
-                    list_in_channels=[2 * c2] * n + [c1 + c2],
-                    list_out_channels=[c2] * n + [c1],
+                ResBlocks3d(
+                    list_in_channels=[2 * c2] * n_depth + [c1 + c2],
+                    list_out_channels=[c2] * n_depth + [c1],
                     cond_channels=cond_channels,
                     attn=attn_depths[i],
                 )
@@ -207,24 +172,25 @@ class UNet(nn.Module):
         self.d_blocks = nn.ModuleList(d_blocks)
         self.u_blocks = nn.ModuleList(reversed(u_blocks))
 
-        self.mid_blocks = ResBlocks(
+        self.mid_blocks = ResBlocks3d(
             list_in_channels=[channels[-1]] * 2,
             list_out_channels=[channels[-1]] * 2,
             cond_channels=cond_channels,
             attn=True,
         )
 
-        downsamples = [nn.Identity()] + [Downsample(c) for c in channels[:-1]]
-        upsamples = [nn.Identity()] + [Upsample(c) for c in reversed(channels[:-1])]
+        downsamples = [nn.Identity()] + [Downsample3d(c) for c in channels[:-1]]
+        upsamples = [nn.Identity()] + [Upsample3d(c) for c in reversed(channels[:-1])]
         self.downsamples = nn.ModuleList(downsamples)
         self.upsamples = nn.ModuleList(upsamples)
 
     def forward(self, x: Tensor, cond: Tensor) -> Tensor:
-        *_, h, w = x.size()
+        *_, d, h, w = x.size()
         n = self._num_down
-        padding_h = math.ceil(h / 2 ** n) * 2 ** n - h
-        padding_w = math.ceil(w / 2 ** n) * 2 ** n - w
-        x = F.pad(x, (0, padding_w, 0, padding_h))
+        pad_d = math.ceil(d / 2 ** n) * 2 ** n - d
+        pad_h = math.ceil(h / 2 ** n) * 2 ** n - h
+        pad_w = math.ceil(w / 2 ** n) * 2 ** n - w
+        x = F.pad(x, (0, pad_w, 0, pad_h, 0, pad_d))
 
         d_outputs = []
         for block, down in zip(self.d_blocks, self.downsamples):
@@ -233,12 +199,12 @@ class UNet(nn.Module):
             d_outputs.append((x_down, *block_outputs))
 
         x, _ = self.mid_blocks(x, cond)
-        
+
         u_outputs = []
         for block, up, skip in zip(self.u_blocks, self.upsamples, reversed(d_outputs)):
             x_up = up(x)
             x, block_outputs = block(x_up, cond, skip[::-1])
             u_outputs.append((x_up, *block_outputs))
 
-        x = x[..., :h, :w]
+        x = x[..., :d, :h, :w]
         return x, d_outputs, u_outputs

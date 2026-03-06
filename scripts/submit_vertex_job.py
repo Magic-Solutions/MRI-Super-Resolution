@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Submit a Vertex AI Custom Job for training on selected recordings."""
+"""Submit a Vertex AI Custom Job for MRI super-resolution training."""
 
 from __future__ import annotations
 
@@ -13,25 +13,25 @@ from pathlib import Path
 
 def build_job_config(args: argparse.Namespace) -> dict:
     container_env = [
-        {"name": "RECORDINGS_MANIFEST_URI", "value": args.recordings_manifest_uri},
         {"name": "OUTPUT_URI", "value": args.output_uri},
         {"name": "RUN_NAME", "value": args.run_name},
-        {"name": "CONFIG_NAME", "value": args.config_name},
-        {"name": "USE_DEPTH", "value": "true" if args.use_depth else "false"},
-        {"name": "CHUNK_SIZE", "value": str(args.chunk_size)},
-        {"name": "DEPTH_MIN_MM", "value": str(args.depth_min_mm)},
-        {"name": "DEPTH_MAX_MM", "value": str(args.depth_max_mm)},
+        {"name": "PREPROCESSED_DATA_URI", "value": args.preprocessed_data_uri},
         {"name": "WANDB_SECRET_ID", "value": args.wandb_secret},
     ]
-    if args.train_overrides:
-        container_env.append({"name": "TRAIN_OVERRIDES", "value": args.train_overrides})
-    if args.init_checkpoint_uri:
-        container_env.append({"name": "INIT_CHECKPOINT_URI", "value": args.init_checkpoint_uri})
+    if args.mode == "2.5d":
+        container_env.append({"name": "CONFIG_NAME", "value": args.config_name})
+        if args.train_overrides:
+            container_env.append({"name": "TRAIN_OVERRIDES", "value": args.train_overrides})
+        if args.init_checkpoint_uri:
+            container_env.append({"name": "INIT_CHECKPOINT_URI", "value": args.init_checkpoint_uri})
+        training_script = "scripts/run_training_job.sh"
+    else:
+        if args.train_3d_args:
+            container_env.append({"name": "TRAIN_3D_ARGS", "value": args.train_3d_args})
+        training_script = "scripts/run_training_job_3d.sh"
     if args.project:
         container_env.append({"name": "GCP_PROJECT", "value": args.project})
 
-    # gcloud ai custom-jobs create --config expects the CustomJobSpec payload
-    # (not a wrapper with displayName/jobSpec keys).
     return {
         "serviceAccount": args.service_account,
         "baseOutputDirectory": {"outputUriPrefix": args.output_uri},
@@ -49,7 +49,7 @@ def build_job_config(args: argparse.Namespace) -> dict:
                 },
                 "containerSpec": {
                     "imageUri": args.image_uri,
-                    "command": ["bash", "scripts/run_training_job.sh"],
+                    "command": ["bash", training_script],
                     "env": container_env,
                 },
             }
@@ -65,26 +65,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-name", required=True)
     parser.add_argument("--image-uri", required=True)
     parser.add_argument("--service-account", required=True)
-    parser.add_argument("--recordings-manifest-uri", required=True)
+    parser.add_argument(
+        "--preprocessed-data-uri",
+        required=True,
+        help="gs://... prefix containing already processed MRI dataset (low_res/full_res).",
+    )
     parser.add_argument("--output-uri", required=True)
     parser.add_argument("--wandb-secret", required=True, help="Secret Manager secret ID containing WANDB_API_KEY")
-    parser.add_argument("--config-name", default="trainer", help="Hydra config name (e.g. trainer, trainer_smoke)")
+    parser.add_argument("--mode", choices=["2.5d", "3d"], default="2.5d", help="Training mode: 2.5d (Hydra-based) or 3d (standalone)")
+    parser.add_argument("--config-name", default="trainer_mri", help="Hydra config name for 2.5d mode")
     parser.add_argument("--machine-type", default="a2-highgpu-1g")
     parser.add_argument("--accelerator-type", default="NVIDIA_TESLA_A100")
     parser.add_argument("--accelerator-count", type=int, default=1)
     parser.add_argument("--boot-disk-type", default="pd-ssd")
     parser.add_argument("--boot-disk-size-gb", type=int, default=500)
-    parser.add_argument("--chunk-size", type=int, default=1000)
-    parser.add_argument(
-        "--use-depth",
-        action="store_true",
-        default=False,
-        help="Enable depth channel preprocessing/training for this run",
-    )
-    parser.add_argument("--depth-min-mm", type=int, default=200)
-    parser.add_argument("--depth-max-mm", type=int, default=1500)
-    parser.add_argument("--train-overrides", default="")
-    parser.add_argument("--init-checkpoint-uri", default=None, help="GCS URI of checkpoint to initialize from")
+    parser.add_argument("--train-overrides", default="", help="Hydra overrides for 2.5d mode")
+    parser.add_argument("--train-3d-args", default="", help="Extra CLI args for train_3d.py in 3d mode")
+    parser.add_argument("--init-checkpoint-uri", default=None, help="GCS URI of checkpoint to initialize from (2.5d only)")
     parser.add_argument("--wait-for-start", dest="wait_for_start", action="store_true", default=True, help="Wait and report until job enters RUNNING state")
     parser.add_argument("--no-wait-for-start", dest="wait_for_start", action="store_false", help="Return immediately after submission")
     parser.add_argument("--start-timeout-seconds", type=int, default=900, help="Max seconds to wait for RUNNING state")

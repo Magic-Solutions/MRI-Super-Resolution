@@ -1,0 +1,6 @@
+train:
+  id: mri
+  size: [128, 128]
+num_actions: 0
+path_data_low_res: src/processed_data_mri/low_res
+path_data_full_res: src/processed_data_mri/full_res

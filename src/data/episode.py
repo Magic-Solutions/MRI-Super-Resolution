@@ -35,11 +35,16 @@ class Episode:
 
     @classmethod
     def load(cls, path: Path, map_location: Optional[torch.device] = None) -> Episode:
+        d = torch.load(Path(path), map_location=map_location, weights_only=False)
+        obs = d["obs"].div(255).mul(2).sub(1)
+        n = obs.size(0)
         return cls(
-            **{
-                k: v.div(255).mul(2).sub(1) if k == "obs" else v
-                for k, v in torch.load(Path(path), map_location=map_location, weights_only=False).items()
-            }
+            obs=obs,
+            act=d.get("act", torch.zeros(n, 0)),
+            rew=d.get("rew", torch.zeros(n)),
+            end=d.get("end", torch.zeros(n, dtype=torch.uint8)),
+            trunc=d.get("trunc", torch.zeros(n, dtype=torch.uint8)),
+            info=d.get("info", {}),
         )
 
     def save(self, path: Path) -> None:

@@ -10,9 +10,14 @@ from .segment import Segment, SegmentId
 
 
 def collate_segments_to_batch(segments: List[Segment]) -> Batch:
-    attrs = ("obs", "act", "rew", "end", "trunc", "mask_padding")
-    stack = (torch.stack([getattr(s, x) for s in segments]) for x in attrs)
-    return Batch(*stack, [s.info for s in segments], [s.id for s in segments])
+    has_act = segments[0].act is not None and segments[0].act.numel() > 0
+    obs = torch.stack([s.obs for s in segments])
+    act = torch.stack([s.act for s in segments]) if has_act else None
+    rew = torch.stack([s.rew for s in segments])
+    end = torch.stack([s.end for s in segments])
+    trunc = torch.stack([s.trunc for s in segments])
+    mask_padding = torch.stack([s.mask_padding for s in segments])
+    return Batch(obs, act, rew, end, trunc, mask_padding, [s.info for s in segments], [s.id for s in segments])
 
 
 def make_segment(episode: Episode, segment_id: SegmentId, should_pad: bool = True) -> Segment:
@@ -29,9 +34,12 @@ def make_segment(episode: Episode, segment_id: SegmentId, should_pad: bool = Tru
     stop = min(len(episode), segment_id.stop)
     mask_padding = torch.cat((torch.zeros(pad_len_left), torch.ones(stop - start), torch.zeros(pad_len_right))).bool()
 
+    has_act = episode.act is not None and episode.act.numel() > 0
+    act = pad(episode.act[start:stop]) if has_act else None
+
     return Segment(
         pad(episode.obs[start:stop]),
-        pad(episode.act[start:stop]),
+        act,
         pad(episode.rew[start:stop]),
         pad(episode.end[start:stop]),
         pad(episode.trunc[start:stop]),
@@ -63,7 +71,6 @@ class DatasetTraverser:
         chunks = []
         for episode_id in range(self.dataset.num_episodes):
             episode = self.dataset.load_episode(episode_id)
-            segments = []
             for i in range(math.ceil(len(episode) / self.chunk_size)):
                 start = i * self.chunk_size
                 stop = (i + 1) * self.chunk_size
@@ -72,10 +79,11 @@ class DatasetTraverser:
                     SegmentId(episode_id, start, stop),
                     should_pad=True,
                 )
-                segment_id_full_res = SegmentId(episode.info["original_file_id"], start, stop)
-                segment.info["full_res"] = self.dataset._dataset_full_res[segment_id_full_res].obs
+                if self.dataset._dataset_full_res is not None and "original_file_id" in episode.info:
+                    segment_id_full_res = SegmentId(episode.info["original_file_id"], start, stop)
+                    segment.info["full_res"] = self.dataset._dataset_full_res[segment_id_full_res].obs
                 chunks.append(segment)
-            if chunks[-1].effective_size < 2:
+            if chunks and chunks[-1].effective_size < 2:
                 chunks.pop()
 
             while len(chunks) >= self.batch_num_samples:

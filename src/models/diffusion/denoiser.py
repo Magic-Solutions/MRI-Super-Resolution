@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from data import Batch
 from .inner_model import InnerModel, InnerModelConfig
+from metrics import psnr as compute_psnr, ssim as compute_ssim
 from utils import LossAndLogs
 
 
@@ -100,20 +101,31 @@ class Denoiser(nn.Module):
         b, t, c, h, w = batch.obs.size()
         H, W = (self.cfg.upsampling_factor * h, self.cfg.upsampling_factor * w) if self.is_upsampler else (h, w)
         n = self.cfg.inner_model.num_steps_conditioning
-        seq_length = t - n  # t = n + 1 + num_autoregressive_steps
+        seq_length = t - n
 
         if self.is_upsampler:
-            all_obs = torch.stack([x["full_res"] for x in batch.info]).to(self.device)
-            low_res = F.interpolate(batch.obs.reshape(b * t, c, h, w), scale_factor=self.cfg.upsampling_factor, mode="bicubic").reshape(b, t, c, H, W)
-            assert all_obs.shape == low_res.shape
+            up_mode = "bilinear" if batch.obs.device.type == "mps" else "bicubic"
+            all_obs_hr = torch.stack([x["full_res"] for x in batch.info]).to(self.device)
+            low_res = F.interpolate(
+                batch.obs.reshape(b * t, c, h, w),
+                scale_factor=self.cfg.upsampling_factor, mode=up_mode,
+            ).reshape(b, t, c, H, W)
         else:
-            all_obs = batch.obs.clone()
+            all_obs_hr = batch.obs.clone()
 
         loss = 0
+        last_denoised = None
+        last_gt = None
         for i in range(seq_length):
-            prev_obs = all_obs[:, i : n + i].reshape(b, n * c, H, W)
-            prev_act = None if self.is_upsampler else batch.act[:, i : n + i]
-            obs = all_obs[:, n + i]
+            if self.is_upsampler:
+                prev_obs = low_res[:, i : n + i].reshape(b, n * c, H, W)
+                target_lr = low_res[:, n + i]
+                obs = all_obs_hr[:, n + i]
+            else:
+                prev_obs = all_obs_hr[:, i : n + i].reshape(b, n * c, H, W)
+                obs = all_obs_hr[:, n + i]
+
+            prev_act = None if (self.is_upsampler or batch.act is None) else batch.act[:, i : n + i]
             mask = batch.mask_padding[:, n + i]
 
             if self.cfg.noise_previous_obs:
@@ -123,7 +135,7 @@ class Denoiser(nn.Module):
                 sigma_cond = None
 
             if self.is_upsampler:
-                prev_obs = torch.cat((prev_obs, low_res[:, n + i]), dim=1)
+                prev_obs = torch.cat((prev_obs, target_lr), dim=1)
 
             sigma = self.sample_sigma_training(b, self.device)
             noisy_obs = self.apply_noise(obs, sigma, self.cfg.sigma_offset_noise)
@@ -135,7 +147,18 @@ class Denoiser(nn.Module):
             loss += F.mse_loss(model_output[mask], target[mask])
 
             denoised = self.wrap_model_output(noisy_obs, model_output, cs)
-            all_obs[:, n + i] = denoised
+            if not self.is_upsampler:
+                all_obs_hr[:, n + i] = denoised
+
+            last_denoised = denoised
+            last_gt = obs
 
         loss /= seq_length
-        return loss, {"loss_denoising": loss.item()}
+        log = {"loss_denoising": loss.item()}
+
+        if not self.training and self.is_upsampler and last_denoised is not None:
+            with torch.no_grad():
+                log["psnr"] = compute_psnr(last_denoised, last_gt)
+                log["ssim"] = compute_ssim(last_denoised, last_gt)
+
+        return loss, log

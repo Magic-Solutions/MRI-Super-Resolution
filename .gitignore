@@ -11,6 +11,12 @@ saved_runs
 dataset
 training_preview.mp4
 
+# MRI data (raw downloads + processed output)
+src/raw_data/FOMO60K/
+src/processed_data_mri/
+*.nii
+*.nii.gz
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -27,6 +33,17 @@ __pycache__/
 *.png
 *.json
 *.python-version
+
+# Paper / figures / overleaf (not code)
+paper.tex
+references.bib
+paper_figures/
+overleaf_upload/
+ACCESS_latex_template_20240429*/
+
+# Run artifacts
+runs/
+inference_output/
 
 # Infra / local state
 infra/pulumi-gcp/.venv/
