@@ -1,7 +1,0 @@
-# <split> <bucket_path>
-# Lines starting with # are ignored.
-# Bucket paths are relative to gs://omgrab-our-exports/
-# Files are saved as <folder>_<filename> in src/raw_data/<split>/
-train om002/cookie_openhand.mkv
-train om002/cookie_dragdropcookies.mkv
-train om002/cookie_dragdropcookies_2.mkv
