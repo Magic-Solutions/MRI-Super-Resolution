@@ -31,6 +31,7 @@ __pycache__/
 *.pt
 *.npy
 *.png
+!assets/*.png
 *.json
 *.python-version
 

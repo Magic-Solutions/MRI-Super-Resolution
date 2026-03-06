@@ -16,6 +16,26 @@ Comparative analysis of **3D convolutional** and **2.5D slice-conditioned** U-Ne
 
 Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x super-resolution.
 
+![PSNR and SSIM comparison](assets/results_bars.png)
+
+### Visual Comparison
+
+**3D model** (GT HR | Model SR | Trilinear):
+
+![3D model sample](assets/sample_3d_axial.png)
+
+**2.5D model** (GT HR | Generated HR | Bicubic LR):
+
+![2.5D model sample](assets/sample_25d.png)
+
+### Per-Pixel Error Heatmap
+
+![Error heatmap](assets/error_heatmap.png)
+
+### Per-Slice PSNR
+
+![Per-slice PSNR](assets/per_slice_psnr.png)
+
 ## Architecture
 
 Both models use the EDM framework (Karras et al. 2022) adapted from DIAMOND:
