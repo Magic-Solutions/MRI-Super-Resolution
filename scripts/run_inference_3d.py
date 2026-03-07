@@ -23,7 +23,7 @@ from models.diffusion.denoiser_3d import Denoiser3d, Denoiser3dConfig
 from models.diffusion.inner_model_3d import InnerModel3dConfig
 from models.diffusion.denoiser import SigmaDistributionConfig
 from data.dataset_3d import MRIVolumeDataset3d
-from metrics import psnr as compute_psnr, ssim as compute_ssim
+from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
 
 def build_model(
@@ -162,7 +162,8 @@ def main() -> None:
     uf = args.upsampling_factor
     patch_size = args.patch_size
     overlap = patch_size // 4
-    all_psnr, all_ssim, all_bic_psnr, all_bic_ssim = [], [], [], []
+    all_psnr, all_ssim, all_lpips = [], [], []
+    all_bic_psnr, all_bic_ssim, all_bic_lpips = [], [], []
 
     for vol_idx in range(min(args.num_samples, len(test_ds))):
         sample = test_ds[vol_idx]
@@ -182,25 +183,32 @@ def main() -> None:
         hr_vol_cpu = hr_vol.cpu()
         trilinear_cpu = trilinear.cpu()
 
-        slice_psnrs, slice_ssims, slice_bpsnrs, slice_bssims = [], [], [], []
+        slice_psnrs, slice_ssims, slice_lpips = [], [], []
+        slice_bpsnrs, slice_bssims, slice_blpips = [], [], []
         for si in range(d):
             p_s = pred_hr_cpu[:, :, si:si+1]
             h_s = hr_vol_cpu[:, :, si:si+1]
             t_s = trilinear_cpu[:, :, si:si+1]
             slice_psnrs.append(compute_psnr(p_s, h_s))
             slice_ssims.append(compute_ssim(p_s, h_s))
+            slice_lpips.append(compute_lpips(p_s, h_s))
             slice_bpsnrs.append(compute_psnr(t_s, h_s))
             slice_bssims.append(compute_ssim(t_s, h_s))
+            slice_blpips.append(compute_lpips(t_s, h_s))
         p = float(np.mean(slice_psnrs))
         s = float(np.mean(slice_ssims))
+        lp = float(np.mean(slice_lpips))
         bp = float(np.mean(slice_bpsnrs))
         bs = float(np.mean(slice_bssims))
+        blp = float(np.mean(slice_blpips))
         all_psnr.append(p)
         all_ssim.append(s)
+        all_lpips.append(lp)
         all_bic_psnr.append(bp)
         all_bic_ssim.append(bs)
-        print(f"  Model:     PSNR={p:.2f} dB  SSIM={s:.4f}")
-        print(f"  Trilinear: PSNR={bp:.2f} dB  SSIM={bs:.4f}")
+        all_bic_lpips.append(blp)
+        print(f"  Model:     PSNR={p:.2f} dB  SSIM={s:.4f}  LPIPS={lp:.4f}")
+        print(f"  Trilinear: PSNR={bp:.2f} dB  SSIM={bs:.4f}  LPIPS={blp:.4f}")
 
         def vol_to_uint8(t):
             return t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu().squeeze(0).squeeze(0).numpy()
@@ -218,11 +226,11 @@ def main() -> None:
         save_slice_comparison(gt_np[:, :, mid_w], pred_np[:, :, mid_w], tri_np[:, :, mid_w], out_dir / f"vol{vol_idx}_sagittal_mid.png")
         print(f"  Saved slices to {out_dir}/vol{vol_idx}_*.png")
 
-    print(f"\n{'=' * 60}")
+    print(f"\n{'=' * 70}")
     print(f"AVERAGE ({len(all_psnr)} volumes):")
-    print(f"  Model:     PSNR={np.mean(all_psnr):.2f} dB  SSIM={np.mean(all_ssim):.4f}")
-    print(f"  Trilinear: PSNR={np.mean(all_bic_psnr):.2f} dB  SSIM={np.mean(all_bic_ssim):.4f}")
-    print(f"{'=' * 60}")
+    print(f"  Model:     PSNR={np.mean(all_psnr):.2f} dB  SSIM={np.mean(all_ssim):.4f}  LPIPS={np.mean(all_lpips):.4f}")
+    print(f"  Trilinear: PSNR={np.mean(all_bic_psnr):.2f} dB  SSIM={np.mean(all_bic_ssim):.4f}  LPIPS={np.mean(all_bic_lpips):.4f}")
+    print(f"{'=' * 70}")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,10 @@ import torch.nn.functional as F
 
 from coroutines import coroutine
 from models.diffusion import Denoiser, DiffusionSampler, DiffusionSamplerConfig
-from models.rew_end_model import RewEndModel
+try:
+    from models.rew_end_model import RewEndModel
+except ImportError:
+    RewEndModel = None
 
 ResetOutput = Tuple[torch.FloatTensor, Dict[str, Any]]
 StepOutput = Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Any]]

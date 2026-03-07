@@ -30,7 +30,7 @@ from hydra.utils import instantiate
 from agent import Agent
 from data.dataset import Dataset, MRIHdf5Dataset
 from envs.world_model_env import DiffusionSampler
-from metrics import psnr as compute_psnr, ssim as compute_ssim
+from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
 
 def parse_args() -> argparse.Namespace:
@@ -144,60 +144,77 @@ def main() -> None:
 
                 model_psnr = compute_psnr(sr_frame, gt_tensor)
                 model_ssim = compute_ssim(sr_frame, gt_tensor)
+                model_lpips = compute_lpips(sr_frame, gt_tensor)
                 bicubic_psnr = compute_psnr(bicubic, gt_tensor)
                 bicubic_ssim = compute_ssim(bicubic, gt_tensor)
+                bicubic_lpips = compute_lpips(bicubic, gt_tensor)
             else:
-                model_psnr = model_ssim = bicubic_psnr = bicubic_ssim = float("nan")
+                model_psnr = model_ssim = model_lpips = float("nan")
+                bicubic_psnr = bicubic_ssim = bicubic_lpips = float("nan")
 
             results.append({
                 "subject": subject_name,
                 "slice": si,
                 "model_psnr": model_psnr,
                 "model_ssim": model_ssim,
+                "model_lpips": model_lpips,
                 "bicubic_psnr": bicubic_psnr,
                 "bicubic_ssim": bicubic_ssim,
+                "bicubic_lpips": bicubic_lpips,
             })
             subject_metrics[subject_name]["model_psnr"].append(model_psnr)
             subject_metrics[subject_name]["model_ssim"].append(model_ssim)
+            subject_metrics[subject_name]["model_lpips"].append(model_lpips)
             subject_metrics[subject_name]["bicubic_psnr"].append(bicubic_psnr)
             subject_metrics[subject_name]["bicubic_ssim"].append(bicubic_ssim)
+            subject_metrics[subject_name]["bicubic_lpips"].append(bicubic_lpips)
 
     elapsed = time.time() - t0
 
-    print(f"\n{'=' * 80}")
-    print(f"{'Subject':<40} {'Model PSNR':>10} {'Model SSIM':>10} {'Bic. PSNR':>10} {'Bic. SSIM':>10}")
-    print(f"{'-' * 80}")
+    print(f"\n{'=' * 100}")
+    print(f"{'Subject':<40} {'Mdl PSNR':>9} {'Mdl SSIM':>9} {'Mdl LPIPS':>10} {'Bic PSNR':>9} {'Bic SSIM':>9} {'Bic LPIPS':>10}")
+    print(f"{'-' * 100}")
 
-    all_model_psnr, all_model_ssim = [], []
-    all_bic_psnr, all_bic_ssim = [], []
+    all_model_psnr, all_model_ssim, all_model_lpips = [], [], []
+    all_bic_psnr, all_bic_ssim, all_bic_lpips = [], [], []
 
     for subj in sorted(subject_metrics.keys()):
         m = subject_metrics[subj]
         mp = np.nanmean(m["model_psnr"])
         ms = np.nanmean(m["model_ssim"])
+        ml = np.nanmean(m["model_lpips"])
         bp = np.nanmean(m["bicubic_psnr"])
         bs = np.nanmean(m["bicubic_ssim"])
-        print(f"{subj:<40} {mp:>10.2f} {ms:>10.4f} {bp:>10.2f} {bs:>10.4f}")
+        bl = np.nanmean(m["bicubic_lpips"])
+        print(f"{subj:<40} {mp:>9.2f} {ms:>9.4f} {ml:>10.4f} {bp:>9.2f} {bs:>9.4f} {bl:>10.4f}")
         all_model_psnr.extend(m["model_psnr"])
         all_model_ssim.extend(m["model_ssim"])
+        all_model_lpips.extend(m["model_lpips"])
         all_bic_psnr.extend(m["bicubic_psnr"])
         all_bic_ssim.extend(m["bicubic_ssim"])
+        all_bic_lpips.extend(m["bicubic_lpips"])
 
-    print(f"{'-' * 80}")
+    print(f"{'-' * 100}")
     print(
         f"{'AVERAGE':<40} "
-        f"{np.nanmean(all_model_psnr):>10.2f} "
-        f"{np.nanmean(all_model_ssim):>10.4f} "
-        f"{np.nanmean(all_bic_psnr):>10.2f} "
-        f"{np.nanmean(all_bic_ssim):>10.4f}"
+        f"{np.nanmean(all_model_psnr):>9.2f} "
+        f"{np.nanmean(all_model_ssim):>9.4f} "
+        f"{np.nanmean(all_model_lpips):>10.4f} "
+        f"{np.nanmean(all_bic_psnr):>9.2f} "
+        f"{np.nanmean(all_bic_ssim):>9.4f} "
+        f"{np.nanmean(all_bic_lpips):>10.4f}"
     )
-    print(f"{'=' * 80}")
+    print(f"{'=' * 100}")
     print(f"\nEvaluated {len(results)} slices in {elapsed:.1f}s ({elapsed / max(len(results), 1):.2f}s/slice)")
 
     csv_path = args.csv_out or (args.checkpoint.parent / "eval_results.csv")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["subject", "slice", "model_psnr", "model_ssim", "bicubic_psnr", "bicubic_ssim"])
+        writer = csv.DictWriter(f, fieldnames=[
+            "subject", "slice",
+            "model_psnr", "model_ssim", "model_lpips",
+            "bicubic_psnr", "bicubic_ssim", "bicubic_lpips",
+        ])
         writer.writeheader()
         writer.writerows(results)
     print(f"Results saved to {csv_path}")

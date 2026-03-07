@@ -3,9 +3,46 @@
 All functions expect tensors in [-1, 1] range with shape (B, C, ...).
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
+
+import lpips as _lpips_lib
+
+_LPIPS_NET: _lpips_lib.LPIPS | None = None
+
+
+def _get_lpips_net(device: torch.device) -> _lpips_lib.LPIPS:
+    """Lazy-init a singleton AlexNet LPIPS model."""
+    global _LPIPS_NET
+    if _LPIPS_NET is None or next(_LPIPS_NET.parameters()).device != device:
+        _LPIPS_NET = _lpips_lib.LPIPS(net="alex").to(device)
+        _LPIPS_NET.eval()
+    return _LPIPS_NET
+
+
+def lpips_distance(pred: Tensor, target: Tensor) -> float:
+    """LPIPS perceptual distance for tensors in [-1, 1].
+
+    Handles single-channel inputs by repeating to 3 channels.
+    Returns a scalar (lower is better).
+    """
+    if pred.dim() == 5:
+        # 3-D volume: compute mean LPIPS over depth slices
+        vals = []
+        for si in range(pred.size(2)):
+            vals.append(lpips_distance(pred[:, :, si], target[:, :, si]))
+        return float(torch.tensor(vals).mean().item())
+
+    if pred.size(1) == 1:
+        pred = pred.repeat(1, 3, 1, 1)
+        target = target.repeat(1, 3, 1, 1)
+
+    net = _get_lpips_net(pred.device)
+    with torch.no_grad():
+        return net(pred, target).item()
 
 
 def psnr(pred: Tensor, target: Tensor) -> float:

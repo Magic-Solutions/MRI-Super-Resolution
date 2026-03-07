@@ -7,14 +7,15 @@ Comparative analysis of **3D convolutional** and **2.5D slice-conditioned** U-Ne
 
 ## Results
 
-| Method | PSNR (dB) | SSIM | Params |
-|---|---|---|---|
-| Bicubic interpolation | 31.01 | 0.952 | -- |
-| Trilinear interpolation | 33.85 | 0.988 | -- |
-| 2.5D EDM (ours, 10 ep) | 33.68 | 0.967 | 51.1M |
-| **3D EDM (ours, 10 ep)** | **37.77** | **0.996** | 50.7M |
+| Method | PSNR (dB) | SSIM | LPIPS | Params |
+|---|---|---|---|---|
+| Bicubic interpolation | 33.89 | 0.957 | 0.091 | -- |
+| EDSR (DIV2K pretrained) | 35.57 | 0.977 | 0.024 | 1.4M |
+| Swin2SR (DIV2K pretrained) | 35.50 | 0.978 | 0.024 | 1.0M |
+| 2.5D EDM (ours, 10 ep) | 35.82 | 0.971 | 0.040 | 51.1M |
+| **3D EDM (ours, 20 ep)** | **37.75** | **0.997** | **0.020** | 50.7M |
 
-Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x super-resolution.
+Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x SR. All methods evaluated on identical test data and degradation pipeline.
 
 ![PSNR and SSIM comparison](assets/results_bars.png)
 
@@ -116,7 +117,7 @@ src/
   data/
     dataset.py       2D slice dataset
     dataset_3d.py    3D patch/volume dataset
-  metrics.py         PSNR and SSIM implementations
+  metrics.py         PSNR, SSIM, LPIPS implementations
 ```
 
 ## Authors
