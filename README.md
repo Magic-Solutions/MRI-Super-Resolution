@@ -17,9 +17,13 @@ Comparative analysis of **3D convolutional** and **2.5D slice-conditioned** U-Ne
 
 Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x SR. All methods evaluated on identical test data and degradation pipeline.
 
+The 3D EDM model is the best-performing configuration in this comparison, with the strongest PSNR, SSIM, and LPIPS overall. In the per-volume analysis reported in the paper, it also consistently outperforms the 2.5D model and interpolation baselines.
+
 ![PSNR and SSIM comparison](assets/results_bars.png)
 
 ### All Methods Visual Comparison
+
+The 3D EDM model recovers the sharpest cortical detail in the zoomed region while preserving clearer anatomical structure than the pretrained natural-image baselines.
 
 ![All methods comparison](assets/visual_all_methods.png)
 
@@ -35,9 +39,13 @@ Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x SR
 
 ### Per-Pixel Error Heatmap
 
+The EDM models reduce reconstruction error at cortical folds and tissue boundaries, with the 3D model achieving the lowest overall error in the manuscript analysis.
+
 ![Error heatmap](assets/error_heatmap.png)
 
 ### Per-Slice PSNR
+
+This plot is shown for the 2.5D model because it operates slice-by-slice; the 3D model is evaluated volumetrically and achieves stronger aggregate metrics.
 
 ![Per-slice PSNR](assets/per_slice_psnr.png)
 
@@ -126,9 +134,9 @@ src/
 
 ## Authors
 
-- **Hendrik Chiche** -- University of California, Berkeley
+- **Hendrik Chiche**
 - **Ludovic Corcos**
-- **Logan Rouge** -- ISIMA, Clermont Auvergne INP
+- **Logan Rouge**
 
 In collaboration with GENCI.
 
