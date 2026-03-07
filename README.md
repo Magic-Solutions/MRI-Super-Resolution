@@ -19,6 +19,10 @@ Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x SR
 
 ![PSNR and SSIM comparison](assets/results_bars.png)
 
+### All Methods Visual Comparison
+
+![All methods comparison](assets/visual_all_methods.png)
+
 ### Visual Comparison
 
 **3D model** (GT HR | Model SR | Trilinear):
