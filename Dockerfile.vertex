@@ -1,8 +1,8 @@
 FROM pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime
 
 WORKDIR /app
-# super-image imports OpenCV, which needs libgthread from glib.
-RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 && \
+# super-image imports OpenCV (opencv-python), which needs libgthread and libGL.
+RUN apt-get update && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 && \
     rm -rf /var/lib/apt/lists/*
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt && \
