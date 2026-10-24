@@ -39,8 +39,12 @@ training:
 
 evaluation:
   should: True
-  every: 20
-  max_test_batches: 50
+  every: 1  # low_res/test holds the validation split
+  max_test_batches: null
+  val_sr_every: 1  # sampled PSNR/SSIM on fixed validation slices; picks agent_best_val.pt (0: off)
+  val_sr_slices_per_volume: 16
+  val_sr_num_steps: 20  # shared EDM sampler, Euler, as in the 3D validation
+  val_seed: 0
   num_inference_samples: 3
   num_inference_steps: 20
 

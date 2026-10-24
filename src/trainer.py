@@ -1,3 +1,5 @@
+from contextlib import contextmanager
+import csv
 from functools import partial
 from pathlib import Path
 import shutil
@@ -15,8 +17,9 @@ from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
-from models.diffusion import DiffusionSampler
-from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, MRIHdf5Dataset
+from metrics import psnr as compute_psnr, ssim as compute_ssim
+from models.diffusion import DiffusionSampler, EDMSamplerConfig, edm_sample, upsampled_condition
+from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, MRIHdf5Dataset, SegmentId
 from utils import (
     configure_opt,
     count_parameters,
@@ -31,6 +34,23 @@ from utils import (
     try_until_no_except,
     wandb_log,
 )
+
+
+@contextmanager
+def fixed_rng(seed: int):
+    """Run a block with a fixed torch seed, then restore the global RNG state (CPU, CUDA, MPS)."""
+    cpu_state = torch.get_rng_state()
+    cuda_states = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    mps_state = torch.mps.get_rng_state() if torch.backends.mps.is_available() else None
+    torch.manual_seed(seed)
+    try:
+        yield
+    finally:
+        torch.set_rng_state(cpu_state)
+        if cuda_states is not None:
+            torch.cuda.set_rng_state_all(cuda_states)
+        if mps_state is not None:
+            torch.mps.set_rng_state(mps_state)
 
 
 class Trainer(StateDictMixin):
@@ -136,7 +156,9 @@ class Trainer(StateDictMixin):
 
         # Data loaders
         c = cfg.upsampler.training
-        seq_length = cfg.agent.upsampler.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
+        inner_cfg = cfg.agent.upsampler.inner_model
+        num_next = getattr(inner_cfg, "num_next_slices_conditioning", 0)
+        seq_length = inner_cfg.num_steps_conditioning + 1 + c.num_autoregressive_steps + num_next
         batch_sampler = BatchSampler(self.train_dataset, self._rank, self._world_size, c.batch_size, seq_length)
         self._data_loader_train = DataLoader(
             dataset=self.train_dataset,
@@ -156,6 +178,8 @@ class Trainer(StateDictMixin):
         self.epoch = 0
         self.num_batch_train = 0
         self.num_batch_test = 0
+        self.best_val_psnr = float("-inf")
+        self.best_val_epoch = 0
 
         if cfg.common.resume:
             self.load_state_checkpoint()
@@ -185,7 +209,13 @@ class Trainer(StateDictMixin):
             # Evaluation
             should_test = self._rank == 0 and self._cfg.evaluation.should and (self.epoch % self._cfg.evaluation.every == 0)
             if should_test:
-                to_log += self.test_upsampler()
+                test_logs = self.test_upsampler()
+                to_log += test_logs
+                val_sr_every = getattr(self._cfg.evaluation, "val_sr_every", 0)
+                val_logs = self.validate_upsampler_sr() if val_sr_every and self.epoch % val_sr_every == 0 else []
+                to_log += val_logs
+                if val_logs:
+                    self.update_best_val(test_logs, val_logs[0])
                 to_log += self.run_inference_samples()
 
             # Logging
@@ -290,21 +320,23 @@ class Trainer(StateDictMixin):
         model.eval()
         model.to(self._device)
         raw_metrics = []
-        for i, batch in enumerate(tqdm(self._data_loader_test, desc="Evaluating upsampler")):
-            if max_batches is not None and i >= max_batches:
-                break
-            batch = batch.to(self._device)
-            _, metrics = model(batch)
-            metrics["num_batch_test_upsampler"] = self.num_batch_test
-            self.num_batch_test += 1
-            raw_metrics.append(metrics)
+        # Same sigmas and noise every epoch, so validation losses are comparable.
+        with fixed_rng(getattr(self._cfg.evaluation, "val_seed", 0)):
+            for i, batch in enumerate(tqdm(self._data_loader_test, desc="Evaluating upsampler")):
+                if max_batches is not None and i >= max_batches:
+                    break
+                batch = batch.to(self._device)
+                _, metrics = model(batch)
+                metrics["num_batch_test_upsampler"] = self.num_batch_test
+                self.num_batch_test += 1
+                raw_metrics.append(metrics)
 
-            if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
-                numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
-                print(
-                    f"[debug][test][upsampler] epoch={self.epoch} batch={i + 1} "
-                    f"obs_shape={tuple(batch.obs.shape)} metrics={numeric_metrics}"
-                )
+                if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
+                    numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
+                    print(
+                        f"[debug][test][upsampler] epoch={self.epoch} batch={i + 1} "
+                        f"obs_shape={tuple(batch.obs.shape)} metrics={numeric_metrics}"
+                    )
 
         summary = {}
         if raw_metrics:
@@ -318,6 +350,74 @@ class Trainer(StateDictMixin):
         return [summary] if summary else []
 
     @torch.no_grad()
+    def validate_upsampler_sr(self) -> Logs:
+        """Mean PSNR/SSIM of evenly spaced validation slices, sampled with the shared EDM sampler and a fixed seed."""
+        cfg = self._cfg.evaluation
+        upsampler = self.agent.upsampler
+        upsampler.eval().to(self._device)
+        n_cond = upsampler.cfg.inner_model.num_steps_conditioning
+        n_next = upsampler.cfg.inner_model.num_next_slices_conditioning
+        up_factor = upsampler.cfg.upsampling_factor
+        up_mode = "bilinear" if self._device.type == "mps" else "bicubic"
+        sampler_cfg = EDMSamplerConfig(num_steps=getattr(cfg, "val_sr_num_steps", 20))
+        generator = torch.Generator(device=self._device).manual_seed(getattr(cfg, "val_seed", 0))
+        slices_per_volume = getattr(cfg, "val_sr_slices_per_volume", 16)
+
+        psnrs, ssims = [], []
+        for ep_id in tqdm(range(self.test_dataset.num_episodes), desc="Validating upsampler (sampling)"):
+            episode = self.test_dataset.load_episode(ep_id)
+            obs_lr = episode.obs.float().div(255).mul(2).sub(1) if episode.obs.dtype == torch.uint8 else episode.obs.float()
+            length = obs_lr.size(0)
+            slice_ids = torch.linspace(0, length - 1, min(slices_per_volume, length)).round().long().unique().tolist()
+            for si in slice_ids:
+                cond_frames = upsampled_condition(obs_lr.to(self._device), si, n_cond, n_next, up_factor, up_mode)
+                _, t, c, h_up, w_up = cond_frames.shape
+                cond = cond_frames.reshape(1, t * c, h_up, w_up)
+                sr = edm_sample(
+                    lambda x, sigma: upsampler.denoise(x, sigma, None, cond, None),
+                    torch.Size((1, c, h_up, w_up)), sampler_cfg, self._device, generator,
+                )
+                hr = self.test_dataset[SegmentId(ep_id, si, si + 1)].info["full_res"][:1].to(self._device)
+                psnrs.append(compute_psnr(sr, hr))
+                ssims.append(compute_ssim(sr, hr))
+
+        upsampler.to("cpu")
+        if not psnrs:
+            return []
+        return [{
+            "upsampler/val/psnr": float(np.mean(psnrs)),
+            "upsampler/val/ssim": float(np.mean(ssims)),
+            "upsampler/val/num_slices": len(psnrs),
+        }]
+
+    def update_best_val(self, test_logs: Logs, val_log: dict) -> None:
+        """Save the agent as agent_best_val.pt when validation PSNR improves; append to val_metrics.csv."""
+        val_psnr = val_log["upsampler/val/psnr"]
+        is_best = val_psnr > self.best_val_psnr
+        if is_best:
+            self.best_val_psnr = val_psnr
+            self.best_val_epoch = self.epoch
+            torch.save(self.agent.state_dict(), self._path_ckpt_dir / "agent_best_val.pt")
+            print(f"New best val PSNR {val_psnr:.2f} dB at epoch {self.epoch}; saved agent_best_val.pt")
+
+        path_csv = self._path_ckpt_dir / "val_metrics.csv"
+        test_summary = test_logs[0] if test_logs else {}
+        row = {
+            "epoch": self.epoch,
+            "num_batch_train": self.num_batch_train,
+            "val_loss_denoising": test_summary.get("upsampler/test/loss_denoising", float("nan")),
+            "val_psnr": val_psnr,
+            "val_ssim": val_log["upsampler/val/ssim"],
+            "is_best": int(is_best),
+        }
+        write_header = not path_csv.is_file()
+        with path_csv.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row))
+            if write_header:
+                writer.writeheader()
+            writer.writerow(row)
+
+    @torch.no_grad()
     def run_inference_samples(self) -> Logs:
         """Super-resolve a few test slices and log GT / generated / bicubic grids to W&B."""
         cfg = self._cfg
@@ -327,7 +427,8 @@ class Trainer(StateDictMixin):
         upsampler = self.agent.upsampler
         upsampler.eval().to(self._device)
         sampler_up = DiffusionSampler(upsampler, instantiate(cfg.sampler))
-        n_cond_up = cfg.agent.upsampler.inner_model.num_steps_conditioning
+        n_cond_up = upsampler.cfg.inner_model.num_steps_conditioning
+        n_next_up = upsampler.cfg.inner_model.num_next_slices_conditioning
         up_factor = upsampler.cfg.upsampling_factor
 
         seq_length = n_cond_up + 1 + cfg.evaluation.num_inference_steps
@@ -379,16 +480,7 @@ class Trainer(StateDictMixin):
 
             gen_hr_frames = []
             for i in vis_idx:
-                context_start = max(0, i - n_cond_up)
-                context_slices = obs_lr[:, context_start:i]
-                if context_slices.size(1) < n_cond_up:
-                    pad = n_cond_up - context_slices.size(1)
-                    context_slices = F.pad(context_slices, [0, 0, 0, 0, 0, 0, pad, 0])
-                low_up = F.interpolate(obs_lr[:, i], scale_factor=up_factor, mode=up_mode).unsqueeze(1)
-                context_hr = F.interpolate(
-                    context_slices.reshape(-1, c, h, w), scale_factor=up_factor, mode=up_mode,
-                ).reshape(1, n_cond_up, c, up_factor * h, up_factor * w)
-                prev = torch.cat((context_hr, low_up), dim=1)
+                prev = upsampled_condition(obs_lr[0], i, n_cond_up, n_next_up, up_factor, up_mode)
                 sr_frame, _ = sampler_up.sample(prev, None)
                 gen_hr_frames.append(sr_frame[0])
 

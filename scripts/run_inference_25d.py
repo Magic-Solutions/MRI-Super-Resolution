@@ -81,6 +81,7 @@ def main() -> None:
     upsampler = agent.upsampler
     up_factor = upsampler.cfg.upsampling_factor
     n_cond = cfg.agent.upsampler.inner_model.num_steps_conditioning
+    assert upsampler.cfg.inner_model.num_next_slices_conditioning == 0, "use scripts/evaluate_25d.py for both-neighbour models"
     up_mode = "bilinear" if device.type == "mps" else "bicubic"
 
     sampler_cfg = instantiate(cfg.sampler)

@@ -29,7 +29,7 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from agent import Agent
 from data.dataset import Dataset, MRIHdf5Dataset
-from models.diffusion import DiffusionSampler
+from models.diffusion import DiffusionSampler, upsampled_condition
 from models.diffusion.edm_sampler import EDMSamplerConfig, edm_sample
 from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
@@ -43,12 +43,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--csv-out", type=Path, default=None, help="Save results CSV (default: eval_results.csv next to checkpoint)")
     p.add_argument("--skip-slices", type=int, default=0, help="Skip first/last N slices per volume (often blank)")
     p.add_argument("--sampler", choices=["legacy", "shared"], default="legacy",
-                   help="legacy: DIAMOND upsampling sampler from the `sampler` config (as in the first submission). "
+                   help="legacy: the stochastic DIAMOND sampler from the `sampler` config. "
                         "shared: deterministic EDM sampler shared with the 3D model (src/models/diffusion/edm_sampler.py).")
     p.add_argument("--order", type=int, choices=[1, 2], default=1, help="Solver order for --sampler shared (1: Euler, 2: Heun)")
     p.add_argument("--sigma-min", type=float, default=2e-3, help="sigma_min for --sampler shared")
     p.add_argument("--sigma-max", type=float, default=5.0, help="sigma_max for --sampler shared")
     p.add_argument("--rho", type=int, default=7, help="rho for --sampler shared")
+    p.add_argument("--seed", type=int, default=0, help="Seed for the sampler noise")
+    p.add_argument("--override", action="append", default=[],
+                   help="Hydra override for the model config, e.g. agent.upsampler.inner_model.num_next_slices_conditioning=1")
     return p.parse_args()
 
 
@@ -56,10 +59,11 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
     print(f"Device: {device}")
+    torch.manual_seed(args.seed)
 
     config_dir = str(Path(__file__).resolve().parent.parent / "config")
     with initialize_config_dir(config_dir=config_dir, version_base="1.3"):
-        cfg = compose(config_name=args.config_name)
+        cfg = compose(config_name=args.config_name, overrides=args.override)
 
     agent_cfg = instantiate(cfg.agent, num_actions=0)
     agent = Agent(agent_cfg).to(device)
@@ -76,7 +80,8 @@ def main() -> None:
         raise RuntimeError("No upsampler found in agent")
 
     up_factor = upsampler.cfg.upsampling_factor
-    n_cond = cfg.agent.upsampler.inner_model.num_steps_conditioning
+    n_cond = upsampler.cfg.inner_model.num_steps_conditioning
+    n_next = upsampler.cfg.inner_model.num_next_slices_conditioning
     up_mode = "bilinear" if device.type == "mps" else "bicubic"
 
     sampler_cfg = instantiate(cfg.sampler)
@@ -127,21 +132,10 @@ def main() -> None:
 
         print(f"[{ep_id + 1}/{lr_dataset.num_episodes}] {subject_name}: {n_eval} slices")
 
+        obs_lr = obs_lr.to(device)
         for si in range(slice_start, slice_end):
-            context_start = max(0, si - n_cond)
-            context = obs_lr[context_start:si].unsqueeze(0).to(device)
-            if context.size(1) < n_cond:
-                pad = n_cond - context.size(1)
-                context = F.pad(context, [0, 0, 0, 0, 0, 0, pad, 0])
-
-            target_lr = obs_lr[si].unsqueeze(0).to(device)
-            _, c, h, w = target_lr.shape
-
-            target_lr_up = F.interpolate(target_lr, scale_factor=up_factor, mode=up_mode).unsqueeze(1)
-            context_up = F.interpolate(
-                context.reshape(-1, c, h, w), scale_factor=up_factor, mode=up_mode,
-            ).reshape(1, n_cond, c, up_factor * h, up_factor * w)
-            prev = torch.cat((context_up, target_lr_up), dim=1)
+            target_lr = obs_lr[si].unsqueeze(0)
+            prev = upsampled_condition(obs_lr, si, n_cond, n_next, up_factor, up_mode)
 
             with torch.no_grad():
                 if args.sampler == "shared":

@@ -19,6 +19,7 @@ class InnerModelConfig:
     attn_depths: List[bool]
     num_actions: Optional[int] = None  # set by trainer after env creation
     is_upsampler: Optional[bool] = None  # set by Denoiser
+    num_next_slices_conditioning: int = 0  # upsampler only: LR slices after the target (1 = both neighbours)
 
 
 class InnerModel(nn.Module):
@@ -36,7 +37,9 @@ class InnerModel(nn.Module):
             nn.SiLU(),
             nn.Linear(cfg.cond_channels, cfg.cond_channels),
         )
-        self.conv_in = Conv3x3((cfg.num_steps_conditioning + int(cfg.is_upsampler) + 1) * cfg.img_channels, cfg.channels[0])
+        assert cfg.is_upsampler or cfg.num_next_slices_conditioning == 0
+        num_cond_frames = cfg.num_steps_conditioning + cfg.num_next_slices_conditioning + int(cfg.is_upsampler)
+        self.conv_in = Conv3x3((num_cond_frames + 1) * cfg.img_channels, cfg.channels[0])
 
         self.unet = UNet(cfg.cond_channels, cfg.depths, cfg.channels, cfg.attn_depths)
 
