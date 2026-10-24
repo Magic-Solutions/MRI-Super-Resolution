@@ -122,9 +122,17 @@ sync_checkpoints_if_changed() {
   fi
 }
 
+# Validation split (written by scripts/make_split.py as low_res/test + full_res/test).
+VAL_ARGS=()
+if [[ -f "${PROCESSED_DIR}/low_res/test/episode_mapping.json" ]]; then
+  VAL_ARGS=(--lr-test "${PROCESSED_DIR}/low_res/test" --hr-test "${PROCESSED_DIR}/full_res/test")
+  echo "Using validation split from ${PROCESSED_DIR}/low_res/test"
+fi
+
 python src/train_3d.py \
   --lr-train "${PROCESSED_DIR}/low_res/train" \
   --hr-train "${PROCESSED_DIR}/full_res/train" \
+  "${VAL_ARGS[@]}" \
   --save-dir "${SAVE_DIR}" \
   --wandb-project mri-super-resolution-3d \
   --wandb-name "${RUN_NAME}" \

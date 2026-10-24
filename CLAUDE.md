@@ -12,19 +12,21 @@ The work has two parts:
 
 Sources:
 - Reviewer comments: `publication/reviewer-comments.html` (5 reviewers; R5 also attached `Access-2026-10274_Proof_hi_flaws.pdf`, which is not in the repo yet and needs to be obtained).
-- Manuscript: `publication/manuscript_ieee_access/preprint_arxiv.tex`.
+- Manuscript: `paper.tex` (`\documentclass{ieeeaccess}`), the file to resubmit. It lives in Overleaf (project 699cae01a03f708c8f9aaf8d); a LaTeX export is at `../context/manuscript/extracted/manuscript_ieee_access/paper.tex` on Eshaan's Mac. The repo has only the arXiv version, `publication/manuscript_ieee_access/preprint_arxiv.tex`.
 
 ## Infrastructure
 
-- GCP project: **`omgrab-dev`**. The local gcloud default is `omgrab-prod`, so always pass `--project=omgrab-dev` or set it.
+- GCP project: **`omgrab-dev`**. The local gcloud default is `omgrab-prod` (on Eshaan's Mac it is `coastal-burner-331405`), so always pass `--project=omgrab-dev` or set it.
+- Region: all 68 past Vertex custom jobs ran in `us-central1` on `g2-standard-8` with 1× L4. MRI jobs used the service accounts `diamond-vertex-trainer@omgrab-dev.iam.gserviceaccount.com` (2.5D/3D) and `omgrab-dev-jobs@omgrab-dev.iam.gserviceaccount.com` (Swin2SR), and read W&B from the secret `wandb-api-key`. Cloud Logging keeps only 30 days, so the March job logs are gone.
 - Data bucket: `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri/` (about 3.5 GiB). It has `full_res/train`, `low_res/{train,test}` and `samples/`, plus `low_res/train/episode_mapping.json` and `info.pt.bak_before_shape_cleanup`. It holds **processed data only**: no raw NIfTI and no code.
-- Vertex artifacts bucket: `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/` (about 55 runs). It contains:
-  - `run-3d-*` with `checkpoints_3d/model_epoch_{10..50}.pt`. The paper used epoch 20; we have checkpoints up to 50.
+- Vertex artifacts bucket: `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/` (55 folders on 2026-10-24: 11 from the MRI project, 44 unrelated). It contains:
+  - `run-3d-*` with `checkpoints_3d/model_epoch_{10..50}.pt`. The paper reports the 3D model after 20 epochs; only `run-3d-20260306-082303` (a 50-epoch run) has an epoch-20 checkpoint, but which file produced the paper's numbers is **NOT VERIFIED**.
   - `run-25d-10ep-*` with a copy of the processed data.
   - `run-swin2sr-2026030[7]-*` with `checkpoints_swin2sr/`. **An MRI-trained Swin2SR already exists**, but it was not reported in the paper and its training script is not in the repo.
   - Older `run-2026022x-*` runs and DIAMOND/game runs (`shorthands-*`) that have nothing to do with MRI.
 - Training images are built by Cloud Build from `Dockerfile.vertex`, which does `COPY . /app`. So the images contain the exact local working tree that was used, including uncommitted files.
-- Raw data: FOMO60K on HuggingFace (`FOMO-MRI/FOMO60K`). The paper used the `PT015_NKI` cohort, with 59 train subjects (100 sessions) and 5 test subjects (6 sessions, 993 sagittal slices).
+- Raw data: FOMO60K on HuggingFace. `FOMO-MRI/FOMO60K` now redirects to **`FOMO-MRI/FOMO50K`**, which is gated: accept the terms on the website, then run `huggingface-cli login`. `PT015_NKI` has 1,316 subjects and 2,281 sessions; 1,315 subjects (2,271 sessions) have `sub_<id>/ses_<n>/t1.nii.gz`. The NKI `LICENSE.txt` points to the Rockland Sample data usage agreement. The paper used the `PT015_NKI` cohort, with 59 train subjects (100 sessions) and 5 test subjects (6 sessions, 993 sagittal slices).
+- **New resubmission dataset (E1, built 2026-10-24):** `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri_resub/`, 1,160 objects, 8.35 GB. Details are in the E1 section below.
 
 ## Repo state and known gaps
 
@@ -38,16 +40,79 @@ Unused DIAMOND code (Atari/CS:GO RL, world-model env, game UI, MKV pipeline) was
 
 Facts worth knowing:
 - **Both models train on the same sagittal 2D-mode data** (`processed_data_mri`). `train_3d.py` stacks the slices back into volumes. The preprocessor's `--mode 3d` writes a `volume_x` HDF5 key that `dataset_3d.py` cannot read; it was never used.
-- The 2.5D sampler config now lives under `sampler:` in `config/trainer_mri.yaml`. It used to be `world_model_env.diffusion_sampler_upsampling`. Defaults: 1-step stochastic Heun.
+- The 2.5D sampler config now lives under `sampler:` in `config/trainer_mri.yaml`. It used to be `world_model_env.diffusion_sampler_upsampling`. Defaults: 1 step, `order: 2` (Heun), σ_max 5, σ_min 1, `s_churn` 10. **This is not a Heun step.** With 1 step, `build_sigmas` gives σ = [5, 0], and `diffusion_sampler.py` skips the Heun correction when the next σ is 0. So the paper's "1-step Heun" (paper.tex lines 239, 283, 511, 515) is one Euler step with churn. `scripts/evaluate_25d.py` overrides the step count with `--num-steps`, which defaults to 20 (also at 371c36a), so which step count produced the paper's 2.5D numbers is **NOT VERIFIED**.
+- **3D patch size (likely 64³, NOT VERIFIED).** In `train_3d.py`, `--patch-size` is the LR patch (HR is `p × 2p × 2p`) and defaults to 64. `scripts/run_training_job_3d.sh` passes no `--patch-size`, and the March 3D job specs pass only `--epochs`. So the March 3D model most likely trained on 64³ LR patches (64×128×128 HR). `scripts/run_inference_3d.py` defaults to 32, and the paper (line 223) says 32³ LR. No surviving log confirms the training value.
+- **The epoch counts in the paper are unclear.** The paper says 2.5D trained for 10 epochs and 3D for 20.
+  - 2.5D: `run-25d-10ep-lr1e-4` and `-lr5e5` are each 10 more epochs warm-started from `run-20260306-035738` epoch 10 (job spec `INIT_CHECKPOINT_URI`), so 20 epochs in total. Which 2.5D run gave the paper's numbers is **NOT VERIFIED**.
+  - 3D: see the `run-3d-*` note above.
+  - The epochs are not comparable anyway: a March 3D epoch covered 258 sessions (from the code), a 2.5D epoch 100. Report optimizer steps or GPU-hours in the resubmission.
 - `common.seed` is now honoured. Before, it was ignored and a random seed was always drawn.
 - `state.pt` files from runs made before the cleanup cannot be resumed with `common.resume=True` (their trainer state has more fields). Warm-starting from their `agent_epoch_*.pt` through `initialization.path_to_ckpt` still works.
-- The paper's 2.5D runs (`run-25d-10ep-lr1e-4`, `run-25d-10ep-lr5e5`) include `main.log` and W&B `.wandb` files with per-epoch logs. These are usable for the convergence answer (R1.2a). The 3D runs only have checkpoints (epochs 10 to 50).
+- The 2.5D runs `run-20260306-035738`, `run-25d-10ep-lr1e-4` and `run-25d-10ep-lr5e5` have per-epoch logs in their W&B files (see "The 2.5D run folders" below; `main.log` is empty). These are usable for the convergence answer (R1.2a). The 3D runs only have checkpoints (epochs 10 to 50).
 - The 35.82 vs 35.67 dB mismatch (R1.4) has a known cause: `scripts/evaluate_25d.py` averages over all pooled slices, while Table 2 reports per-subject means.
+- **The March models did not see the same training volumes.** `processed_data_mri/low_res/train` holds 258 episodes (156 subjects), but its `info.pt` lists only the first 100 (59 subjects, the paper's number). `info.pt.bak_before_shape_cleanup` lists all 258, with lengths {166, 167, 169, 176, 254}. Who reads what:
+  - **2.5D (`src/trainer.py`):** reads `info.pt`. Its logs say "train_dataset: 100 episodes, 17600 steps" and "test_dataset: 0 episodes".
+  - **Swin2SR (`src/train_swin2sr.py`):** iterates `lr_dataset.num_episodes`, i.e. `info.pt`, so 100 episodes.
+  - **3D (`src/data/dataset_3d.py::_discover_volume_pairs`):** reads `episode_mapping.json`, so all 258 episodes (156 subjects), including the non-176-slice volumes. This is from the code; the March 3D logs have expired, so there is no log confirming it.
+  - The paper's 3D vs 2.5D comparison is therefore also confounded by training-set size. The new dataset fixes this: its `info.pt` and `episode_mapping.json` list the same volumes.
+- **No validation was ever run.** `low_res/test/info.pt` is empty, and the 2.5D runs show `Evaluating upsampler: 0it` every epoch. Model selection had no validation data (R2-m1).
+- **The paper's test subjects** (sub_2642, sub_2952, sub_6794 ses1+ses2, sub_8390) are not stored anywhere in GCS. They can be regenerated from FOMO.
+- **Preprocessing is verified bit-exact.** Raw FOMO `t1.nii.gz` is int16, RAS, (176, 256, 256), 1.0×0.977×0.977 mm, sagittal along axis 0, with no resample/crop/pad. The rule:
+  - `p1, p99 = np.percentile(vol[vol > 0], [1, 99])`
+  - clip, then `(x − p1)/(p99 − p1)·255`, then `astype(uint8)` (truncates)
+  - HR frame i = `np.rot90(x[i])`
+  - LR = floor of the 2×2 block mean
+  This reproduces the stored HR and LR exactly (100%, max diff 0) for sub_8112 ses_1 and sub_10915 ses_1, and matches `src/raw_data/scripts/main.py`. `main.py` computes in float32; the new scripts use float64, and both gave identical output on these volumes.
+- **The 2.5D run folders:** `main.log` is 0 bytes. The per-epoch stdout is in `wandb/run-*/files/output.log`; the scalars are in `wandb-summary.json` and the `.wandb` files.
+- **Reference errors in the manuscript** (checked against publisher/arXiv pages):
+  - [11]: wrong authors. The actual authors are Jannat et al., Front. Hum. Neurosci. 2025.
+  - [12]: wrong authors and venue details. The actual entry is Zhao et al., "MRI Super-Resolution With Partial Diffusion Models", IEEE TMI 44(3), 2025, doi 10.1109/TMI.2024.3483109 (prostate/knee, not brain). The text, and E6 below, call it "Xia et al.".
+  - [13]: wrong authors. The actual authors are Safari et al., Res-SRDiff, arXiv 2503.01576. The text calls it "Wu et al.".
+  - [19]: FOMO60K is now `FOMO-MRI/FOMO50K`, and the dataset card asks users to cite Cerri et al., arXiv:2506.14432.
+  - [23]: "M. Burber" should be M. Burchi.
 
 Still open:
-1. **No committed subject split.** The train/test subject IDs only exist implicitly, in the processed data and `low_res/train/episode_mapping.json`.
-2. **No validation split and no validation logging.** `src/train_3d.py` logs only the training loss per epoch, so convergence cannot be shown.
-3. **No EDSR fine-tuning script.** Only Swin2SR was trained on MRI.
+1. ~~No committed subject split.~~ The new dataset ships a `split.json` (see E1). It is not committed under `splits/` yet.
+2. **Validation logging: done for every model, not committed** (on `resub/eval-fixes-main`).
+   - **3D:** patch 0001 gives `src/train_3d.py` a per-epoch validation loss, periodic validation PSNR/SSIM and `model_best_val.pt` (item 4).
+   - **2.5D** (`src/trainer.py`, 2026-10-24):
+     - The validation loss (`test_upsampler`) now runs under a fixed seed, so it is comparable across epochs.
+     - `trainer_mri.yaml` now validates every epoch (`evaluation.every: 1`, was 20) over the whole validation split (`max_test_batches: null`, was 50).
+     - New `validate_upsampler_sr` samples 16 evenly spaced slices per validation volume with the shared 20-step EDM sampler (as the 3D validation does), seeded, and logs `upsampler/val/psnr` and `ssim`.
+     - The best epoch by validation PSNR is saved as `checkpoints/agent_best_val.pt`. Every validation is appended to `checkpoints/val_metrics.csv`, which `run_training_job.sh` uploads with the checkpoints.
+     - Smoke-tested on mini with a small U-Net: 2 epochs, and a rerun gives an identical `val_metrics.csv`. The full 51M model trains at about 3 min per step on the Mac's MPS backend, so it was only started there, not finished.
+   - **Baselines:** see item 3.
+3. **EDSR and Swin2SR now train from one script, not committed.** `src/train_swin2sr.py --arch {swin2sr,edsr}`. EDSR-base (16 residual blocks, 64 features, 1.37M parameters) is built from scratch with `super_image`'s `EdsrConfig`, so both baselines see the same data, L1 loss and validation. On Vertex, EDSR uses the existing mode: `launch_vertex_training.py --mode swin2sr --train-swin2sr-args "--arch edsr"`. Other changes to the script:
+   - It stores slices as uint8: 7.2 GB for the 88,000 training slices instead of 28.8 GB as float32. The old version would probably not have fit in a g2-standard-8's 32 GB. Items are the same 0–255 values as before (LR differs by ≤1.5e-8 float rounding).
+   - Validation now runs every epoch (was 5) on 16 evenly spaced slices of every validation volume. Before, it used the first 200 slices, about one subject. LPIPS is now opt-in (`--eval-lpips`).
+   - It saves `<arch>_best_val.pt` and `val_metrics.csv`, and sets a seed (`--seed`, default 0).
+   - Both were smoke-tested on mini (64 training slices, 2 epochs): EDSR on MPS, Swin2SR on CPU (it barely moves on MPS). Both write `<arch>_best_val.pt` and `val_metrics.csv`.
+4. **Patches 0001 and 0002 are rebased and smoke-tested, but not committed** (2026-10-24). They sit on the local branch `resub/eval-fixes-main` (from main @ 745b582) as staged, uncommitted changes in 10 files. The `info.pt` fix in `src/data/dataset.py` (item 5) is a further unstaged change. The only conflict was the `DiffusionSampler` import in `scripts/evaluate_25d.py`, resolved to main's `models.diffusion`. The applied `make_split.py`, `preprocess_fomo.py`, `edm_sampler.py` and `patchwise_3d.py` are byte-identical to the standalone copies. Smoke tests on `~/data/mri_resub/mini/` (Mac, MPS, torch 2.4.1 and numpy 1.26 as pinned):
+   - `train_3d.py` with validation: 2 epochs, small U-Net, 4 train and 2 val volumes. It logs train and val loss, val PSNR/SSIM, and saves `model_best_val.pt`.
+   - `run_inference_3d.py` on the 2 test volumes: every SSIM call now gets a 2-D slice (704 of 704).
+   - The patched `Denoiser3d.sample` is bit-identical to main's at 1, 5 and 20 steps.
+   - `evaluate_25d.py --sampler legacy` and `--sampler shared` both run end to end on a randomly initialised 2.5D agent.
+   - `make_split.py` on mini: the 2.5D loader (`info.pt`) and the 3D loader (`episode_mapping.json`) see the same volumes in every split.
+   - Not tested: `preprocess_fomo.py` (it needs a FOMO download; it was tested on synthetic NIfTIs before), the 2.5D trainer, Vertex.
+   - Local quirks, not code bugs: on MPS the 3D model needs `PYTORCH_ENABLE_MPS_FALLBACK=1` (`upsample_trilinear3d`). LPIPS was stubbed out, because it downloads AlexNet weights on first use.
+5. **Fixed, not committed: the new dataset's `info.pt` files didn't load under numpy 1.26** (2026-10-24, on `resub/eval-fixes-main`, unstaged). `Dataset.load_from_default_path` in `src/data/dataset.py` now unpickles `info.pt` with a pickle module whose Unpickler maps `numpy._core.*` to `numpy.core.*` when numpy 1.x is installed; nothing else changes. Checks:
+   - `evaluate_25d.py` run directly loads the mini test set under numpy 1.26, then runs end to end with `--sampler legacy` and `--sampler shared` (LPIPS stubbed only).
+   - The loader reads numpy-2-written and numpy-1.26-written `info.pt` under numpy 1.26 and 2.2 (all four pass).
+   - Not tested on Vertex.
+
+   The background: the files were pickled under numpy 2.x and reference `numpy._core.multiarray`. `requirements.txt` pins `numpy==1.26.0`, and the Vertex image installs it (`Dockerfile.vertex`). With the pinned versions, `torch.load` fails with `ModuleNotFoundError: No module named 'numpy._core'` (reproduced locally; not yet run on Vertex).
+   - Affected: the three `info.pt` files in `processed_data_mri_resub/`, so the 2.5D trainer, `train_swin2sr.py`, `evaluate_25d.py`, `evaluate_baselines.py` and `run_inference_25d.py`. Every one of them loads through `Dataset.load_from_default_path` in `src/data/dataset.py`.
+   - Not affected: the episode `.pt` files (no numpy objects), the HDF5 files, and the 3D trainer (it reads `episode_mapping.json`).
+   - An `info.pt` written under numpy 1.26 loads under both numpy 1.26 and 2.2 (tested).
+   - Eshaan chose option (a), the remap on load, over (b) rewriting the files under a new GCS prefix and (c) moving to numpy 2.x. A global `sys.modules` alias was rejected because it breaks the torch and scipy imports.
+6. **Evaluation inconsistencies to settle before E8.** `run_inference_3d.py` reports a "Trilinear" baseline. `evaluate_25d.py` reports "Bicubic", but uses bilinear on MPS. The two matched on the mini test set (30.32 dB) because both ran bilinear in-plane on MPS; on CUDA they would differ. Also, the `vol*_axial_mid.png` figures from `run_inference_3d.py` show a sagittal slice, because axis 0 is sagittal (a naming bug only). `evaluate_25d.py` used to set no seed, so repeated runs differed by up to 0.045 dB per slice. It now takes `--seed` (default 0), and two runs give identical CSVs. It also takes `--override` for Hydra overrides of the model config, which is needed to evaluate a both-neighbours model.
+7. **Both-neighbours conditioning for 2.5D, not committed** (R1.2c, E3).
+   - Set `agent.upsampler.inner_model.num_next_slices_conditioning=1`. Together with `num_steps_conditioning: 1`, the model is then conditioned on the previous and the next LR slice. The default 0 keeps the old model: same parameter shapes (a pre-change checkpoint loads strictly) and the same conditioning.
+   - The frame order is `[previous…, next…, target LR]` everywhere. `src/models/diffusion/slice_conditioning.py` builds it for sampling: trainer validation, W&B samples and `evaluate_25d.py`.
+   - Tested: with 0 next slices the helper equals the old inline code for every slice; the frames the training loss sees equal the frames the samplers build; 2-epoch smoke training works; `evaluate_25d.py` runs on it.
+   - `run_inference_25d.py` and `generate_paper_figures.py` still build previous-only context, and now refuse a both-neighbours model with an assert.
+   - With `num_next = 1`, the last slice of a volume is never a training target. BatchSampler pads only before the start. That is 1 slice in 176.
+8. **Vertex GPU quota not checked.** `gcloud alpha services quota list` needs the gcloud `alpha` component, which is not installed. The Cloud Quotas API would need an access token in a request. Check it in the console (IAM & Admin → Quotas, service "Vertex AI API", region us-central1, "custom model training … L4"), or decide how to query it.
 
 ## Reviewer comment triage
 
@@ -56,12 +121,12 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | # | Comment (reviewers) | Decision | Action |
 |---|---|---|---|
 | 1 | Test set too small (5 subj); 59 train subjects not justified (R1.5, R2.1, R2.3, R3.1, R4, R5) | **MUST** | Larger FOMO60K train/val/test split at the subject level (see E1). Explain why the subset size was chosen. |
-| 2 | Unequal sampling: 3D uses 20-step Euler, 2.5D uses 1-step Heun (R1.2, R2-m2) | **MUST** | Run both models with the same 20-step sampler (E2). The step sweep is part of E3. |
-| 3 | No ablations: steps, patch size, attention, P_mean/P_std, context slices (R1.2c, R1.6, R5) | **MUST** | Small ablation (E3). |
-| 4 | Unequal epochs, convergence not shown (R1.2a, R2-m1) | **MUST** | Validation loss and PSNR/SSIM curves vs. training steps for **every** trained model (E4). |
-| 5 | Synthetic block-averaging degradation; no k-space, noise or Gibbs (R1.3, R2.4, R5) | **MUST** | k-space truncation degradation (E5). State the clinical scope in the abstract and conclusion. |
-| 6 | No diffusion / MRI-specific SR comparator (R1.1, R3.6, R4) | **MUST** | Add at least one more diffusion model (E6) and discuss it at the algorithm level vs. Xia et al. and Wu et al. (R4). |
-| 7 | Baselines use DIV2K weights, not MRI fine-tuning (R1.1, R2.6, R4, R5; raised by every reviewer) | **MUST** (added) | Retrain/fine-tune EDSR and Swin2SR on the same MRI training set and degradation (E7). Swin2SR runs already exist in the bucket. |
+| 2 | Unequal sampling: 3D uses 20-step Euler; 2.5D is described as "1-step Heun" (R1.2, R2-m2) | **MUST** | Run both models with the same 20-step sampler (E2). The step sweep is part of E3. The 2.5D "1-step Heun" is in fact one Euler step with churn (σ 5 → 0; see "Facts worth knowing"). Correct paper.tex lines 239, 283, 511 and 515, and say so in the R1.2 and R2-m2 answers. |
+| 3 | No ablations: steps, patch size, attention, P_mean/P_std, context slices (R1.2c, R1.6, R5) | **MUST** | Small ablation (E3). Also add the sampling sigma schedule (sigma_min, sigma_max, rho) and the 3D patch overlap at inference (R5: "sigma schedule sensitivity", "patch overlap effects"). |
+| 4 | Unequal epochs, convergence not shown (R1.2a, R2-m1) | **MUST** | Validation loss and PSNR/SSIM curves vs. training steps for **every** trained model (E4). The paper's own epoch counts are unclear (the 2.5D runs total 20 epochs, and a 3D epoch covered 2.6× more volumes), so the resubmission reports optimizer steps or GPU-hours, not epochs. |
+| 5 | Synthetic block-averaging degradation; no k-space, noise or Gibbs (R1.3, R2.4, R5) | **MUST** | k-space truncation degradation (E5). State the clinical scope in the abstract and conclusion. R5 also lists Gibbs ringing, motion and scanner noise: k-space truncation already produces Gibbs; add Rician noise as a cheap extra variant; state motion as a limitation. |
+| 6 | No diffusion / MRI-specific SR comparator (R1.1, R3.6, R4) | **MUST** | Add at least one more diffusion model (E6) and discuss it at the algorithm level vs. Xia et al. and Wu et al. (R4). Note: the paper's "Xia et al. [12]" is actually Zhao et al., "MRI Super-Resolution With Partial Diffusion Models", IEEE TMI 2025, and its "Wu et al. [13]" is actually Safari et al., Res-SRDiff (arXiv 2503.01576). Use the correct names in the paper and in the response to R1 and R4. |
+| 7 | Baselines use DIV2K weights, not MRI fine-tuning (R1.1, R2.6, R3.7, R4, R5; raised by every reviewer) | **MUST** (added) | Retrain/fine-tune EDSR and Swin2SR on the same MRI training set and degradation (E7). Swin2SR runs already exist in the bucket. R4: domain-trained models beating off-the-shelf ones is already well established, so once the baselines are retrained the claim must rest on the architecture comparison. |
 | 8 | No CIs, no significance tests, slices not independent (R1.5, R3.2, R5) | **MUST** (added, cheap) | Subject-level mean ± SD, bootstrap 95% CI over subjects, paired Wilcoxon at the subject level (E8). Uncertainty bands on per-slice plots. |
 | 9 | 35.82 vs 35.67 dB inconsistency (R1.4) | **MUST** (added) | Define one aggregation method (subject-level mean) and recompute every table from a single eval script. |
 | 10 | Single dataset; external validation on IXI/HCP (R2.2, R4, R5) | **SHOULD** | Zero-shot evaluation on IXI T1 (public, small) (E9). |
@@ -71,16 +136,18 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | 14 | Other MRI-specific non-diffusion SR (mDCSRN, SynthSR) (R1.1) | **SHOULD** | mDCSRN trained on our split if time allows. SynthSR solves a different task: discuss it, don't benchmark it. |
 | 15 | Through-plane SR is more clinically relevant (R1-m7) | Stretch / TEXT | Could reuse the E5 pipeline along the slice axis. Otherwise state it as a limitation. |
 | 16 | T1-only (R1-m8) | Stretch / TEXT | FOMO60K includes other contrasts. Zero-shot T2/FLAIR evaluation only if cheap. |
-| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | Use ablation results (context slices, steps) to support the argument. |
+| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | Use ablation results (context slices, steps) to support the argument. Note: in March the 3D model trained on 258 sessions (`episode_mapping.json`) while 2.5D trained on 100 (`info.pt`), from reading the code. The old gap is therefore confounded by data size; the new split gives both models the same data. |
 | 18 | Limited novelty; DIAMOND origin (R3.4, R5, R1-m6, R1-m9) | TEXT | Frame the contribution as a controlled comparison. Document every change made relative to DIAMOND (channels, attention, sigma). Name the DIAMOND origin in the abstract/introduction. |
-| 19 | Incomplete setup description (R3.8) and validation/model selection (R2-m1) | TEXT | Full degradation, training and config details in the paper and supplement. |
-| 20 | Fig. 1 and Fig. 4 captions, ref [8] uncited, abstract phrasing (R1-m1, m2, m3, m10) | TEXT | Fix directly. |
-| 21 | LPIPS validity on grayscale MRI; 2.5D SSIM below baselines (R1-m4, m5) | TEXT | Add a limitation note and an explicit discussion. |
-| 22 | "Super-resolution" is a controlled synthetic setting (R2.5, R2-m3) | TEXT | Reword the introduction, discussion and conclusion. |
+| 19 | Incomplete setup description (R3.8) and validation/model selection (R2-m1) | TEXT | Full degradation, training and config details in the paper and supplement. State the 3D patch size actually used: the paper says 32³ LR, but the March training most likely used 64³ (NOT VERIFIED). The new runs set `--patch-size` explicitly. |
+| 20 | Fig. 1 and Fig. 4 captions, references, abstract phrasing (R1-m1, m2, m3, m10; R5-minor: captions should give a more anatomically precise interpretation) | TEXT | Fix directly. References: wrong author lists in [11], [12] and [13], plus issues in [19] and [23] (see `../context/reference_errors.md`). Six bibitems are never cited: b4, b5, b8, b14, b15, b16. |
+| 21 | LPIPS validity on grayscale MRI; 2.5D SSIM below baselines (R1-m4, m5) | TEXT | Add a limitation note and an explicit discussion. Finding: `scripts/run_inference_3d.py` computed 3D SSIM on 5-D slices, so `metrics.ssim` used an 11×11×11 window over zero-padded depth, which inflates SSIM (0.817 became 0.976 on the same image pair). The paper's 3D SSIM of 0.997 is not comparable with the 2-D SSIM of 2.5D and the baselines. This is fixed in patch 0001; recompute all SSIM as 2-D per slice. |
+| 22 | "Super-resolution" is a controlled synthetic setting (R2.5, R2-m3; R5-minor: "occasional overstatement of conclusions relative to dataset scale") | TEXT | Reword the introduction, discussion and conclusion. |
 | 23 | Missing MRI-SR related work (R1 Q4, R2 Q4) | TEXT | Expand related work. |
 | 24 | Radiologist reader study (R2.7, R5) | REBUT | Out of scope; offer the segmentation-based downstream metric (row 11) instead. |
 | 25 | "Ecosystem-level consequences of warming" (R2.7) | REBUT | Clearly pasted in by mistake from another review. Point this out politely. |
 | 26 | Pathological cases (R1 Q3) | TEXT | State as a limitation. |
+| 27 | R5's technical appendix `Access-2026-10274_Proof_hi_flaws.pdf` (R5) | **MUST** obtain | Its contents are unknown, so the triage is not complete until we have it. Owner: Hendrik (IEEE Author Portal). |
+| 28 | Submission package (decision letter) | **MUST** | Get the response template and the Resubmission Checklist (both attached to the letter, not in the repo). **The "Request for Byline Change" form is required**: Eshaan is joining the author list (decided 2026-10-24). It needs a detailed justification of each author's contribution, is uploaded as "Request for byline change form", and the justification is entered again during submission. The letter calls author changes "rare and exceptional" and leaves the decision to the Editor. Agree the author order and get every author's OK, including Ludovic Corcos and Logan Rouge. Owner: Hendrik (IEEE Author Portal); open questions are in `../ASK_HENDRIK.md`. |
 
 ## Experiments
 
@@ -96,10 +163,34 @@ General rules for every experiment:
   - Split at the subject level. Target: test ≥ 30 subjects, plus a separate val split (about 10 subjects) for model selection.
   - Record the reason for the final size (compute or storage).
   - Generate train, val and test data with the recovered preprocessing script.
+  - **Status: DONE (2026-10-24).** Eshaan chose **500 train / 6 val / 70 test subjects**, matching DisC-Diff's IXI split.
+    - Data: NKI only, one session per subject (the lowest), 176-slice volumes only.
+    - Location: `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri_resub/`, laid out as follows.
+      - `training/low_res/train`, `training/full_res/train`: 500 subjects, 88,000 slices.
+      - `training/low_res/test`, `training/full_res/test`: the 6 **validation** subjects (211, 7657, 8027, 8917, 9095, 9530), 1,056 slices. They sit under `test` because the 2.5D trainer evaluates on `<data>/test` and `train_3d.py` takes `--lr-test/--hr-test`.
+      - `evaluation/low_res/test`, `evaluation/full_res/test`: the 70 held-out **test** subjects, 12,320 slices. Never use them for training or model selection.
+      - `split.json` (all subject and session IDs per split) and `sessions.txt` (the 650 sessions selected with seed 0).
+    - 2.5D: `PREPROCESSED_DATA_URI=…/processed_data_mri_resub/training`. 3D: train/val from `training/`, final test from `evaluation/`.
+    - **Its `info.pt` files were pickled under numpy 2.x.** Under the pinned numpy 1.26 they load only through the fixed `Dataset.load_from_default_path` (see "Still open", item 5; fixed but not committed).
+    - Built by `scripts/preprocess_fomo.py` (`select` → `download`/`preprocess --fetch --delete-raw`) and `scripts/make_split.py` (`--num-test 70 --num-val 6 --num-train 500 --seed 0 --require-num-slices 176`). These are in Eshaan's local folder `~/personal/projects/mri-super-resolution/scripts/` and **not yet committed** to this repo.
+    - 650 subjects were selected; 2 were skipped for shape (256, 320, 320): sub_502 and sub_2839.
+    - sub_8112 ses_1 and sub_10915 ses_1 were verified bit-identical to the original bucket data.
+    - **Overlap with the first submission:** the new test set contains 2 of the paper's 59 training subjects (and 7 of the 156 in the old bucket). The paper's 5 test subjects are in no new split. **Don't evaluate the old March checkpoints on the new test set**; retrain instead.
+  - Why this size: 500/6/70 was Eshaan's choice, made after comparing split sizes in comparable papers:
+
+    | Paper | Train / val / test |
+    |---|---|
+    | DCSRN and mDCSRN-GAN (HCP) | 780 / 111 (+111) / 111 |
+    | DisC-Diff (IXI) | 500 / 6 / 70 |
+    | PDM | 206/142, 600/200, 636/200 (train/test) |
+    | Res-SRDiff | 121/21 and 268/66 (no val) |
+
+    Brain-MRI SR test sets are typically 70–111 subjects. Not yet confirmed with Hendrik, who suggested about 30 test and 100–200 train subjects on the call (`../ASK_HENDRIK.md`).
+  - **Cost per epoch vs. March:** 2.5D and Swin2SR see 500 volumes instead of 100, so **5×**. 3D sees 500 instead of 258, so about 1.9× (the 258 is from the code, NOT VERIFIED by a log). A March 2.5D epoch took about 42.5 min on one L4 (3,200 batches), so a new 2.5D epoch should take about 3.5 h if the cost scales linearly (estimate).
 - **E2 — Matched sampler.** Use the same EDM sampler (Euler or Heun; pick one and justify) with 20 steps for both 3D and 2.5D. Report the old 1-step 2.5D result for reference.
 - **E3 — Small hyperparameter ablation.** Use a reduced budget (subset of train data, fewer steps) and the val split.
   - Sampling steps {1, 5, 20} for both models.
-  - 2.5D context slices: {1 previous, both neighbours, 2 on each side}.
+  - 2.5D context slices: {1 previous, both neighbours, 2 on each side}. Set with `num_steps_conditioning` (before) and `num_next_slices_conditioning` (after); see "Still open" item 7.
   - 3D patch size: {32³, 64³}.
   - EDM sigma distribution (P_mean, P_std): {(-1.2, 1.2), (-0.6, 1.0), (0.0, 1.0)}.
   - Attention: deepest level only vs. the two deepest levels (only if budget allows).
@@ -121,7 +212,7 @@ General rules for every experiment:
     - Xia et al.'s partial diffusion model (explicitly named by R1, already cited).
   - Prefer an MRI-specific one (Xia et al.) if its code exists. Otherwise use SR3 or ResShift.
   - Train it on the same split and degradation, and include it in E4 and E8.
-- **E7 — Fair baselines.** EDSR and Swin2SR trained/fine-tuned on the same data and degradation. Bicubic stays as a reference.
+- **E7 — Fair baselines.** EDSR and Swin2SR trained/fine-tuned on the same data and degradation. Bicubic stays as a reference. Both train from scratch with `src/train_swin2sr.py --arch {swin2sr,edsr}` ("Still open" item 3).
 - **E8 — Statistics.**
   - Per-subject metrics, mean ± SD, bootstrap 95% CI over subjects.
   - Paired Wilcoxon signed-rank between methods (subject level, with Holm correction).
@@ -134,17 +225,20 @@ General rules for every experiment:
 0. **Recovery & reproducibility.**
    - Recover the MRI preprocessing script, the Swin2SR training code and the subject lists from: the Vertex training images in Artifact Registry (`omgrab-dev`), Vertex custom-job specs and Cloud Logging, the run directories, the bucket metadata (`episode_mapping.json`, `info.pt*`) and any local copies.
    - Commit what we recover.
-   - Re-run the evaluation of the existing epoch-20 3D and 10-epoch 2.5D checkpoints, and check they reproduce the paper's numbers.
+   - Re-run the evaluation of the existing March 3D and 2.5D checkpoints, and check they reproduce the paper's numbers. This is also how to settle which checkpoints, step counts and patch size the paper used (all NOT VERIFIED, see "Facts worth knowing").
 1. **Data.** E1 splits, plus the k-space test set (E5a) and IXI (E9).
 2. **Tooling.** Validation logging (E4), a single eval harness with statistics (E8), compute profiling, and the `degrade_kspace` function.
 3. **Main training.** 3D, 2.5D, EDSR, Swin2SR and the new diffusion model on the new split.
 4. **Ablations.** E3, and E5b.
 5. **Analysis.** E10, figures, tables.
-6. **Writing.** Update `preprint_arxiv.tex`, prepare the highlighted-changes PDF, and write the response-to-reviewers document (one entry per comment, matching the triage table).
+6. **Writing.** Update `paper.tex` (`\documentclass{ieeeaccess}`, the file to resubmit to IEEE Access); `preprint_arxiv.tex` is the IEEEtran arXiv version, kept in sync if wanted. Then prepare the highlighted-changes PDF, and write the response-to-reviewers document (one entry per comment, matching the triage table).
 
 ## Conventions
 
-- Training on Vertex AI uses `scripts/launch_vertex_training.py`. Write new runs to `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/<descriptive-name>/`.
-- Never overwrite the original paper runs or the processed data in the bucket. Write new processed data under a new prefix, e.g. `processed_data_mri_v2/`.
+- Training on Vertex AI uses `scripts/launch_vertex_training.py`. Write new runs to `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/mri-resub-<descriptive-name>/`. Other people's runs share `diamond/runs/`, so every new run name starts with `mri-resub-`.
+- Never delete or overwrite anything in `omgrab-dev`: not the original paper runs, not the processed data, not other people's runs. Write new processed data under a new prefix (the resubmission data is in `processed_data_mri_resub/`).
+- Ask Eshaan before launching any Vertex job.
+- Never push `diamond-train:latest` (the launcher's `--push-latest` does). Build resubmission images as `us-central1-docker.pkg.dev/omgrab-dev/diamond-training/mri-resub-train:<git sha>` from a clean `git archive` of that commit, and pass `--image-uri`.
+- Until a W&B account exists, launch with `--wandb-secret ""`, and add `wandb.mode=offline` (2.5D) or `--wandb-project=` (3D, baselines). Otherwise the 2.5D trainer retries `wandb.init` forever (`try_until_no_except`). The convergence data is in each run's `val_metrics.csv`.
 - Do not commit data, checkpoints or `.nii` files (already covered by `.gitignore`).
 - Keep the triage table above up to date as decisions change.

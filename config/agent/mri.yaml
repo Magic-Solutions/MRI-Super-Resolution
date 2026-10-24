@@ -9,7 +9,8 @@ upsampler:
   inner_model:
     _target_: models.diffusion.InnerModelConfig
     img_channels: 1
-    num_steps_conditioning: 1
+    num_steps_conditioning: 1  # LR slices before the target
+    num_next_slices_conditioning: 0  # LR slices after the target (1 here and above = both neighbours)
     cond_channels: 2048
     depths:
     - 2

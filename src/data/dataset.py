@@ -1,7 +1,9 @@
 from collections import Counter
 import multiprocessing as mp
 from pathlib import Path
+import pickle
 import shutil
+import types
 from typing import Any, Dict, Optional
 
 import h5py
@@ -14,6 +16,21 @@ from .episode import Episode
 from .segment import Segment, SegmentId
 from .utils import make_segment
 from utils import StateDictMixin
+
+
+class _NumpyCompatUnpickler(pickle.Unpickler):
+    """Read info.pt files pickled under numpy 2.x ("numpy._core.*") when running numpy 1.x ("numpy.core.*")."""
+
+    def find_class(self, module: str, name: str) -> Any:
+        if module.startswith("numpy._core") and not hasattr(np, "_core"):
+            module = "numpy.core" + module[len("numpy._core"):]
+        return super().find_class(module, name)
+
+
+# torch.load takes a pickle module; this one differs from pickle only in its Unpickler.
+_numpy_compat_pickle = types.ModuleType("numpy_compat_pickle")
+_numpy_compat_pickle.__dict__.update({k: v for k, v in vars(pickle).items() if not k.startswith("__")})
+_numpy_compat_pickle.Unpickler = _NumpyCompatUnpickler
 
 
 class Dataset(StateDictMixin, TorchDataset):
@@ -144,7 +161,7 @@ class Dataset(StateDictMixin, TorchDataset):
 
     def load_from_default_path(self) -> None:
         if self._default_path.is_file():
-            self.load_state_dict(torch.load(self._default_path, weights_only=False))
+            self.load_state_dict(torch.load(self._default_path, weights_only=False, pickle_module=_numpy_compat_pickle))
 
 
 class MRIHdf5Dataset(StateDictMixin, TorchDataset):

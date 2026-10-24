@@ -101,7 +101,8 @@ class Denoiser(nn.Module):
         b, t, c, h, w = batch.obs.size()
         H, W = (self.cfg.upsampling_factor * h, self.cfg.upsampling_factor * w) if self.is_upsampler else (h, w)
         n = self.cfg.inner_model.num_steps_conditioning
-        seq_length = t - n
+        n_next = self.cfg.inner_model.num_next_slices_conditioning
+        seq_length = t - n - n_next
 
         if self.is_upsampler:
             up_mode = "bilinear" if batch.obs.device.type == "mps" else "bicubic"
@@ -135,7 +136,9 @@ class Denoiser(nn.Module):
                 sigma_cond = None
 
             if self.is_upsampler:
-                prev_obs = torch.cat((prev_obs, target_lr), dim=1)
+                # Conditioning frames: n previous slices, n_next following slices, then the target's LR slice.
+                next_obs = low_res[:, n + i + 1 : n + i + 1 + n_next].reshape(b, n_next * c, H, W)
+                prev_obs = torch.cat((prev_obs, next_obs, target_lr), dim=1)
 
             sigma = self.sample_sigma_training(b, self.device)
             noisy_obs = self.apply_noise(obs, sigma, self.cfg.sigma_offset_noise)

@@ -563,6 +563,7 @@ def fig_pixel_error_heatmap() -> None:
     upsampler = agent.upsampler
     up_factor = upsampler.cfg.upsampling_factor
     n_cond = cfg.agent.upsampler.inner_model.num_steps_conditioning
+    assert upsampler.cfg.inner_model.num_next_slices_conditioning == 0, "use scripts/evaluate_25d.py for both-neighbour models"
     sampler_cfg = instantiate(cfg.sampler)
     sampler_cfg.num_steps_denoising = 1
     sampler = DiffusionSampler(upsampler, sampler_cfg)

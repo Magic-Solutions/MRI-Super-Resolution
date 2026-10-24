@@ -16,8 +16,10 @@ def build_job_config(args: argparse.Namespace) -> dict:
         {"name": "OUTPUT_URI", "value": args.output_uri},
         {"name": "RUN_NAME", "value": args.run_name},
         {"name": "PREPROCESSED_DATA_URI", "value": args.preprocessed_data_uri},
-        {"name": "WANDB_SECRET_ID", "value": args.wandb_secret},
     ]
+    # Vertex rejects empty env values; with no secret the job scripts skip W&B login.
+    if args.wandb_secret:
+        container_env.append({"name": "WANDB_SECRET_ID", "value": args.wandb_secret})
     if args.mode == "2.5d":
         container_env.append({"name": "CONFIG_NAME", "value": args.config_name})
         if args.train_overrides:
@@ -75,7 +77,7 @@ def parse_args() -> argparse.Namespace:
         help="gs://... prefix containing already processed MRI dataset (low_res/full_res).",
     )
     parser.add_argument("--output-uri", required=True)
-    parser.add_argument("--wandb-secret", required=True, help="Secret Manager secret ID containing WANDB_API_KEY")
+    parser.add_argument("--wandb-secret", required=True, help="Secret Manager secret ID containing WANDB_API_KEY (empty: no W&B login)")
     parser.add_argument("--mode", choices=["2.5d", "3d", "swin2sr"], default="2.5d", help="Training mode: 2.5d (Hydra-based), 3d (standalone), or swin2sr (fine-tune Swin2SR)")
     parser.add_argument("--config-name", default="trainer_mri", help="Hydra config name for 2.5d mode")
     parser.add_argument("--machine-type", default="a2-highgpu-1g")

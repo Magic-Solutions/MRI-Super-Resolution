@@ -5,9 +5,11 @@ Usage:
 """
 
 import argparse
+import csv
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -17,6 +19,7 @@ from data.dataset_3d import MRIPatchDataset3d, MRIVolumeDataset3d
 from models.diffusion.denoiser_3d import Denoiser3d, Denoiser3dConfig
 from models.diffusion.inner_model_3d import InnerModel3dConfig
 from models.diffusion.denoiser import SigmaDistributionConfig
+from models.diffusion.patchwise_3d import patchwise_sample
 from metrics import psnr as compute_psnr, ssim as compute_ssim
 
 try:
@@ -40,8 +43,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train 3D MRI super-resolution model.")
     parser.add_argument("--lr-train", type=Path, required=True, help="LR train directory (.pt files)")
     parser.add_argument("--hr-train", type=Path, required=True, help="HR train directory (.hdf5 files)")
-    parser.add_argument("--lr-test", type=Path, default=None, help="LR test directory")
-    parser.add_argument("--hr-test", type=Path, default=None, help="HR test directory")
+    parser.add_argument("--lr-test", type=Path, default=None, help="LR validation directory (used for checkpoint selection, never the held-out test set)")
+    parser.add_argument("--hr-test", type=Path, default=None, help="HR validation directory")
+    parser.add_argument("--eval-every", type=int, default=1, help="Validation loss every N epochs")
+    parser.add_argument("--eval-psnr-every", type=int, default=None, help="Validation PSNR/SSIM every N epochs (default: --save-every)")
+    parser.add_argument("--eval-max-volumes", type=int, default=4)
+    parser.add_argument("--eval-num-steps", type=int, default=20)
     parser.add_argument("--patch-size", type=int, default=64)
     parser.add_argument("--upsampling-factor", type=int, default=2)
     parser.add_argument("--patches-per-volume", type=int, default=8)
@@ -64,31 +71,48 @@ def parse_args() -> argparse.Namespace:
 
 
 @torch.no_grad()
+def validation_loss(model: Denoiser3d, val_patches: MRIPatchDataset3d, batch_size: int, device: torch.device, seed: int = 0) -> float:
+    """Mean denoising loss on validation patches, with fixed patches and noise levels every epoch."""
+    np_state = np.random.get_state()
+    np.random.seed(seed)
+    devices = [device] if device.type == "cuda" else []
+    with torch.random.fork_rng(devices=devices):
+        torch.manual_seed(seed)
+        losses = []
+        for batch in DataLoader(val_patches, batch_size=batch_size, shuffle=False, num_workers=0):
+            loss, _ = model(batch["lr"].to(device), batch["hr"].to(device))
+            losses.append(loss.item())
+    np.random.set_state(np_state)
+    return sum(losses) / max(len(losses), 1)
+
+
+@torch.no_grad()
 def evaluate_3d(
     model: Denoiser3d,
     lr_test: Path,
     hr_test: Path,
     upsampling_factor: int,
     device: torch.device,
+    patch_size: int,
     num_steps: int = 20,
     max_volumes: int = 4,
 ) -> dict:
-    """Run evaluation on test volumes and compute PSNR/SSIM."""
-    from data.dataset_3d import MRIVolumeDataset3d
-
+    """Sliding-window sampling on validation volumes; PSNR/SSIM are 2-D per slice, averaged per volume."""
     model.eval()
     test_ds = MRIVolumeDataset3d(lr_test, hr_test, upsampling_factor)
     psnr_vals, ssim_vals = [], []
 
     for i in range(min(len(test_ds), max_volumes)):
         sample = test_ds[i]
-        lr_vol = sample["lr"].unsqueeze(0).to(device)
-        hr_vol = sample["hr"].unsqueeze(0).to(device)
+        lr_vol = sample["lr"].unsqueeze(0)
+        hr_vol = sample["hr"].unsqueeze(0)
 
-        pred_hr = model.sample(lr_vol, num_steps=num_steps)
-
-        psnr_vals.append(compute_psnr(pred_hr, hr_vol))
-        ssim_vals.append(compute_ssim(pred_hr, hr_vol))
+        pred_hr = patchwise_sample(
+            model, lr_vol, device, patch_size, patch_size // 4, upsampling_factor, num_steps, verbose=False,
+        )
+        d = min(pred_hr.size(2), hr_vol.size(2))
+        psnr_vals.append(sum(compute_psnr(pred_hr[:, :, si], hr_vol[:, :, si]) for si in range(d)) / d)
+        ssim_vals.append(sum(compute_ssim(pred_hr[:, :, si], hr_vol[:, :, si]) for si in range(d)) / d)
 
     model.train()
     return {
@@ -144,6 +168,19 @@ def main() -> None:
     )
     print(f"Train: {len(train_dataset)} patches from {train_dataset.num_volumes} volumes")
 
+    val_patches = None
+    if args.lr_test and args.hr_test:
+        val_patches = MRIPatchDataset3d(
+            lr_dir=args.lr_test,
+            hr_dir=args.hr_test,
+            patch_size=args.patch_size,
+            upsampling_factor=args.upsampling_factor,
+            patches_per_volume=args.patches_per_volume,
+        )
+        print(f"Val: {len(val_patches)} patches from {val_patches.num_volumes} volumes")
+    eval_psnr_every = args.eval_psnr_every or args.save_every
+    best_val_psnr = float("-inf")
+
     args.save_dir.mkdir(parents=True, exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
@@ -183,13 +220,43 @@ def main() -> None:
 
         log_dict = {"epoch": epoch, "train/loss": avg_loss}
 
-        if args.lr_test and args.hr_test and epoch % args.save_every == 0:
-            eval_metrics = evaluate_3d(model, args.lr_test, args.hr_test, args.upsampling_factor, device)
+        if val_patches is not None and epoch % args.eval_every == 0:
+            val_loss = validation_loss(model, val_patches, args.batch_size, device)
+            log_dict["val/loss"] = val_loss
+            print(f"  val: loss={val_loss:.4f}")
+
+        if val_patches is not None and epoch % eval_psnr_every == 0:
+            eval_metrics = evaluate_3d(
+                model, args.lr_test, args.hr_test, args.upsampling_factor, device,
+                args.patch_size, num_steps=args.eval_num_steps, max_volumes=args.eval_max_volumes,
+            )
             log_dict.update(eval_metrics)
-            print(f"  eval: PSNR={eval_metrics.get('eval/psnr', 0):.2f}  SSIM={eval_metrics.get('eval/ssim', 0):.4f}")
+            print(f"  val: PSNR={eval_metrics.get('eval/psnr', 0):.2f}  SSIM={eval_metrics.get('eval/ssim', 0):.4f}")
+            if eval_metrics["eval/psnr"] > best_val_psnr:
+                best_val_psnr = eval_metrics["eval/psnr"]
+                log_dict["is_best"] = 1
+                torch.save(model.state_dict(), args.save_dir / "model_best_val.pt")
+                print(f"  New best val PSNR; saved {args.save_dir / 'model_best_val.pt'}")
 
         if args.wandb_project and wandb is not None:
             wandb.log(log_dict)
+
+        if val_patches is not None:
+            row = {
+                "epoch": epoch,
+                "train_loss": avg_loss,
+                "val_loss": log_dict.get("val/loss", ""),
+                "val_psnr": log_dict.get("eval/psnr", ""),
+                "val_ssim": log_dict.get("eval/ssim", ""),
+                "is_best": log_dict.get("is_best", 0),
+            }
+            path_csv = args.save_dir / "val_metrics.csv"
+            write_header = not path_csv.is_file()
+            with path_csv.open("a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(row))
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
 
         if epoch % args.save_every == 0:
             ckpt_path = args.save_dir / f"model_epoch_{epoch}.pt"
