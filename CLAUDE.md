@@ -19,7 +19,7 @@ Sources:
 - GCP project: **`omgrab-dev`**. The local gcloud default is `omgrab-prod` (on Eshaan's Mac it is `coastal-burner-331405`), so always pass `--project=omgrab-dev` or set it.
 - Region: all 68 past Vertex custom jobs ran in `us-central1` on `g2-standard-8` with 1× L4. MRI jobs used the service accounts `diamond-vertex-trainer@omgrab-dev.iam.gserviceaccount.com` (2.5D/3D) and `omgrab-dev-jobs@omgrab-dev.iam.gserviceaccount.com` (Swin2SR), and read W&B from the secret `wandb-api-key`. Cloud Logging keeps only 30 days, so the March job logs are gone.
 - Data bucket: `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri/` (about 3.5 GiB). It has `full_res/train`, `low_res/{train,test}` and `samples/`, plus `low_res/train/episode_mapping.json` and `info.pt.bak_before_shape_cleanup`. It holds **processed data only**: no raw NIfTI and no code.
-- Vertex artifacts bucket: `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/` (56 folders: 11 from the MRI project, 45 unrelated). It contains:
+- Vertex artifacts bucket: `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/` (55 folders on 2026-10-24: 11 from the MRI project, 44 unrelated). It contains:
   - `run-3d-*` with `checkpoints_3d/model_epoch_{10..50}.pt`. The paper reports the 3D model after 20 epochs; only `run-3d-20260306-082303` (a 50-epoch run) has an epoch-20 checkpoint, but which file produced the paper's numbers is **NOT VERIFIED**.
   - `run-25d-10ep-*` with a copy of the processed data.
   - `run-swin2sr-2026030[7]-*` with `checkpoints_swin2sr/`. **An MRI-trained Swin2SR already exists**, but it was not reported in the paper and its training script is not in the repo.
@@ -238,5 +238,7 @@ General rules for every experiment:
 - Training on Vertex AI uses `scripts/launch_vertex_training.py`. Write new runs to `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/mri-resub-<descriptive-name>/`. Other people's runs share `diamond/runs/`, so every new run name starts with `mri-resub-`.
 - Never delete or overwrite anything in `omgrab-dev`: not the original paper runs, not the processed data, not other people's runs. Write new processed data under a new prefix (the resubmission data is in `processed_data_mri_resub/`).
 - Ask Eshaan before launching any Vertex job.
+- Never push `diamond-train:latest` (the launcher's `--push-latest` does). Build resubmission images as `us-central1-docker.pkg.dev/omgrab-dev/diamond-training/mri-resub-train:<git sha>` from a clean `git archive` of that commit, and pass `--image-uri`.
+- Until a W&B account exists, launch with `--wandb-secret ""`, and add `wandb.mode=offline` (2.5D) or `--wandb-project=` (3D, baselines). Otherwise the 2.5D trainer retries `wandb.init` forever (`try_until_no_except`). The convergence data is in each run's `val_metrics.csv`.
 - Do not commit data, checkpoints or `.nii` files (already covered by `.gitignore`).
 - Keep the triage table above up to date as decisions change.
