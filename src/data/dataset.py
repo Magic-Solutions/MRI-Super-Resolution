@@ -2,7 +2,7 @@ from collections import Counter
 import multiprocessing as mp
 from pathlib import Path
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import h5py
 import numpy as np
@@ -66,14 +66,6 @@ class Dataset(StateDictMixin, TorchDataset):
     @property
     def name(self) -> str:
         return self._name
-
-    @property
-    def counts_rew(self) -> List[int]:
-        return [self.counter_rew[r] for r in [-1, 0, 1]]
-
-    @property
-    def counts_end(self) -> List[int]:
-        return [self.counter_end[e] for e in [0, 1]]
 
     def _reset(self) -> None:
         self.num_episodes = 0
@@ -153,56 +145,6 @@ class Dataset(StateDictMixin, TorchDataset):
     def load_from_default_path(self) -> None:
         if self._default_path.is_file():
             self.load_state_dict(torch.load(self._default_path, weights_only=False))
-
-
-class CSGOHdf5Dataset(StateDictMixin, TorchDataset):
-    def __init__(self, directory: Path) -> None:
-        super().__init__()
-        filenames = sorted(Path(directory).rglob("*.hdf5"), key=lambda x: x.stem)
-        self._filenames = {f"{x.parent.name}/{x.name}": x for x in filenames}
-        if filenames:
-            with h5py.File(filenames[0], "r") as f:
-                self.num_channels = int(np.asarray(f["frame_0_x"]).shape[2])
-        else:
-            self.num_channels = 0
-        self._length_one_episode = 1000
-        self.num_episodes = len(self._filenames)
-        self.num_steps = self._length_one_episode * self.num_episodes
-        self.lengths = np.array([self._length_one_episode] * self.num_episodes, dtype=np.int64)
-
-    def __len__(self) -> int:
-        return self.num_steps
-  
-    def save_to_default_path(self) -> None:
-        pass
-
-    def __getitem__(self, segment_id: SegmentId) -> Segment:
-        assert segment_id.start < self._length_one_episode and segment_id.stop > 0 and segment_id.start < segment_id.stop
-        pad_len_right = max(0, segment_id.stop - self._length_one_episode)
-        pad_len_left = max(0, -segment_id.start)
-
-        start = max(0, segment_id.start)
-        stop = min(self._length_one_episode, segment_id.stop)
-        mask_padding = torch.cat((torch.zeros(pad_len_left), torch.ones(stop - start), torch.zeros(pad_len_right))).bool()
-
-        with h5py.File(self._filenames[segment_id.episode_id], "r") as f:
-            obs = torch.stack([torch.tensor(f[f"frame_{i}_x"][:]).permute(2, 0, 1).div(255).mul(2).sub(1) for i in range(start, stop)])
-            act = torch.tensor(np.array([f[f"frame_{i}_y"][:] for i in range(start, stop)]))
-
-        def pad(x):
-            right = F.pad(x, [0 for _ in range(2 * x.ndim - 1)] + [pad_len_right]) if pad_len_right > 0 else x
-            return F.pad(right, [0 for _ in range(2 * x.ndim - 2)] + [pad_len_left, 0]) if pad_len_left > 0 else right
-
-        obs = pad(obs)
-        act = pad(act)
-        rew = torch.zeros(obs.size(0))
-        end = torch.zeros(obs.size(0), dtype=torch.uint8)
-        trunc = torch.zeros(obs.size(0), dtype=torch.uint8)
-        return Segment(obs, act, rew, end, trunc, mask_padding, info={}, id=SegmentId(segment_id.episode_id, start, stop))
-    
-    def load_episode(self, episode_id: int) -> Episode:  # used by DatasetTraverser
-        s = self[SegmentId(episode_id, 0, self._length_one_episode)]
-        return Episode(s.obs, s.act, s.rew, s.end, s.trunc, s.info)
 
 
 class MRIHdf5Dataset(StateDictMixin, TorchDataset):

@@ -1,0 +1,39 @@
+IEEE Access upload checklist for MRI_denoiser
+
+Files created:
+- ieee_access_cover_letter.rtf
+- ieee_access_conflict_of_interest_none.rtf
+
+Recommended upload mapping:
+- Main Manuscript:
+  Upload one ZIP containing the full LaTeX manuscript package.
+- Conflict of Interest:
+  If the submission system lets you select "None of the authors have a conflict of interest to disclose", use that and no file is required.
+  If the system still expects a file, use ieee_access_conflict_of_interest_none.rtf.
+- Cover letter / Comments:
+  Use ieee_access_cover_letter.rtf.
+- Author Bios and Photos:
+  No separate upload needed right now because author bios are already included at the end of paper.tex.
+
+Main manuscript package status:
+- NOT READY TO ZIP YET
+
+paper.tex references these figure files, but they are currently missing from /Users/hendrik/MRI_denoiser/overleaf_upload:
+- fig_method_overview.pdf
+- fig_psnr_ssim_bars.pdf
+- fig_visual_all_methods.pdf
+- fig_per_slice_psnr.pdf
+- fig_visual_comparison_3d.pdf
+- fig_per_subject_psnr.pdf
+- fig_pixel_error_heatmap.pdf
+
+Current files present in /Users/hendrik/MRI_denoiser/overleaf_upload:
+- paper.tex
+- ieeeaccess.cls
+- spotcolor.sty
+- font/map files
+
+Before uploading the Main Manuscript ZIP:
+1. Add the seven missing figure PDFs into /Users/hendrik/MRI_denoiser/overleaf_upload.
+2. Confirm the LaTeX package compiles successfully.
+3. ZIP the contents of /Users/hendrik/MRI_denoiser/overleaf_upload and upload that ZIP as Main Manuscript.

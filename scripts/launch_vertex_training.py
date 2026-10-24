@@ -135,6 +135,15 @@ def build_train_3d_args_string(args: argparse.Namespace) -> str:
     return " ".join(parts)
 
 
+def build_train_swin2sr_args_string(args: argparse.Namespace) -> str:
+    parts: list[str] = []
+    if args.epochs is not None:
+        parts.append(f"--epochs {args.epochs}")
+    if args.train_swin2sr_args:
+        parts.append(args.train_swin2sr_args)
+    return " ".join(parts)
+
+
 def print_submission_summary(
     *,
     run_name: str,
@@ -188,7 +197,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable auto-loading values from pulumi stack output",
     )
-    parser.add_argument("--mode", choices=["2.5d", "3d"], default="2.5d", help="Training mode: 2.5d (slice-based) or 3d (volumetric patches)")
+    parser.add_argument("--mode", choices=["2.5d", "3d", "swin2sr"], default="2.5d", help="Training mode: 2.5d (slice-based), 3d (volumetric patches), or swin2sr (fine-tune Swin2SR)")
     parser.add_argument("--run-name", default=None)
     parser.add_argument("--display-name-prefix", default="mri-train")
     parser.add_argument(
@@ -206,6 +215,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--grad-acc-steps", type=int, default=None, help="Override grad_acc_steps (2.5d only)")
     parser.add_argument("--train-overrides", default="", help="Hydra overrides (2.5d only)")
     parser.add_argument("--train-3d-args", default="", help="Extra CLI args for train_3d.py (3d only, e.g. '--batch-size 4 --patch-size 32')")
+    parser.add_argument("--train-swin2sr-args", default="", help="Extra CLI args for train_swin2sr.py (swin2sr only, e.g. '--batch-size 32 --lr 1e-4')")
     parser.add_argument("--machine-type", default="a2-highgpu-1g")
     parser.add_argument("--accelerator-type", default="NVIDIA_TESLA_A100")
     parser.add_argument("--accelerator-count", type=int, default=1)
@@ -261,7 +271,8 @@ def main() -> None:
         build_and_push_latest_image(image_uri, project=project, region=region)
 
     mode = args.mode
-    prefix = "3d" if mode == "3d" else "25d"
+    prefix_map = {"3d": "3d", "2.5d": "25d", "swin2sr": "swin2sr"}
+    prefix = prefix_map[mode]
     run_name = args.run_name or datetime.utcnow().strftime(f"run-{prefix}-%Y%m%d-%H%M%S")
     display_name = f"{args.display_name_prefix}-{run_name}"
     output_uri = f"{artifact_bucket_uri.rstrip('/')}/runs/{run_name}"
@@ -275,6 +286,11 @@ def main() -> None:
             config_name = "trainer_mri"
         train_overrides = build_train_override_string(args)
         extra_info = f"config={config_name}  overrides={train_overrides or '(none)'}"
+    elif mode == "swin2sr":
+        config_name = "trainer_mri"
+        train_overrides = ""
+        train_swin2sr_args = build_train_swin2sr_args_string(args)
+        extra_info = f"train_swin2sr_args={train_swin2sr_args or '(defaults)'}"
     else:
         config_name = "trainer_mri"
         train_overrides = ""
@@ -347,6 +363,8 @@ def main() -> None:
     ]
     if mode == "3d":
         submit_cmd.extend(["--train-3d-args", train_3d_args])
+    elif mode == "swin2sr":
+        submit_cmd.extend(["--train-swin2sr-args", train_swin2sr_args])
     if init_checkpoint_uri:
         submit_cmd.extend(["--init-checkpoint-uri", init_checkpoint_uri])
     if args.dry_run:

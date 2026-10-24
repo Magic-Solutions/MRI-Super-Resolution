@@ -93,7 +93,7 @@ python scripts/launch_vertex_training.py \
   --epochs 10 --push-latest --yes
 ```
 
-For 3D training, add `--mode 3d`.
+For 3D training, add `--mode 3d`; for the MRI-trained Swin2SR baseline, add `--mode swin2sr`.
 
 ### Run inference
 
@@ -117,19 +117,25 @@ python scripts/evaluate_25d.py \
 
 ```
 config/              Hydra configs (trainer_mri.yaml, agent/mri.yaml, env/mri.yaml)
-scripts/             Training launchers, inference, evaluation
+scripts/             Vertex launchers, inference, evaluation, paper figures
 src/
   main.py            2.5D training entry point (Hydra)
+  trainer.py         2.5D training loop (EDM upsampler)
   train_3d.py        3D training entry point (argparse)
-  trainer.py         Core training loop
+  train_swin2sr.py   Swin2SR baseline trained on the MRI slices
+  agent.py           Wrapper holding the 2.5D upsampler
   models/
-    diffusion/       EDM denoiser (2D + 3D variants)
+    diffusion/       EDM denoiser + sampler (2D + 3D variants)
     blocks.py        2D UNet building blocks
     blocks3d.py      3D UNet building blocks
   data/
     dataset.py       2D slice dataset
     dataset_3d.py    3D patch/volume dataset
+  raw_data/scripts/
+    main.py          FOMO60K NIfTI -> LR/HR training pairs
+    view_mri.py      NIfTI viewer for visual QC
   metrics.py         PSNR, SSIM, LPIPS implementations
+results/paper_v1/    Per-slice baseline metrics from the original submission
 ```
 
 ## Authors

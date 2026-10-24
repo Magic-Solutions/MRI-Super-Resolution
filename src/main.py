@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Union
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 import torch
 from torch.distributed import init_process_group, destroy_process_group
 import torch.multiprocessing as mp
@@ -12,10 +12,8 @@ from trainer import Trainer
 from utils import skip_if_run_is_over
 
 
-OmegaConf.register_new_resolver("eval", eval)
 
-
-@hydra.main(config_path="../config", config_name="trainer", version_base="1.3")
+@hydra.main(config_path="../config", config_name="trainer_mri", version_base="1.3")
 def main(cfg: DictConfig) -> None:
     setup_visible_cuda_devices(cfg.common.devices)
     world_size = torch.cuda.device_count()
