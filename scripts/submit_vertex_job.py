@@ -25,6 +25,10 @@ def build_job_config(args: argparse.Namespace) -> dict:
         if args.init_checkpoint_uri:
             container_env.append({"name": "INIT_CHECKPOINT_URI", "value": args.init_checkpoint_uri})
         training_script = "scripts/run_training_job.sh"
+    elif args.mode == "swin2sr":
+        if args.train_swin2sr_args:
+            container_env.append({"name": "TRAIN_SWIN2SR_ARGS", "value": args.train_swin2sr_args})
+        training_script = "scripts/run_training_job_swin2sr.sh"
     else:
         if args.train_3d_args:
             container_env.append({"name": "TRAIN_3D_ARGS", "value": args.train_3d_args})
@@ -72,7 +76,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-uri", required=True)
     parser.add_argument("--wandb-secret", required=True, help="Secret Manager secret ID containing WANDB_API_KEY")
-    parser.add_argument("--mode", choices=["2.5d", "3d"], default="2.5d", help="Training mode: 2.5d (Hydra-based) or 3d (standalone)")
+    parser.add_argument("--mode", choices=["2.5d", "3d", "swin2sr"], default="2.5d", help="Training mode: 2.5d (Hydra-based), 3d (standalone), or swin2sr (fine-tune Swin2SR)")
     parser.add_argument("--config-name", default="trainer_mri", help="Hydra config name for 2.5d mode")
     parser.add_argument("--machine-type", default="a2-highgpu-1g")
     parser.add_argument("--accelerator-type", default="NVIDIA_TESLA_A100")
@@ -81,6 +85,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--boot-disk-size-gb", type=int, default=500)
     parser.add_argument("--train-overrides", default="", help="Hydra overrides for 2.5d mode")
     parser.add_argument("--train-3d-args", default="", help="Extra CLI args for train_3d.py in 3d mode")
+    parser.add_argument("--train-swin2sr-args", default="", help="Extra CLI args for train_swin2sr.py in swin2sr mode")
     parser.add_argument("--init-checkpoint-uri", default=None, help="GCS URI of checkpoint to initialize from (2.5d only)")
     parser.add_argument("--wait-for-start", dest="wait_for_start", action="store_true", default=True, help="Wait and report until job enters RUNNING state")
     parser.add_argument("--no-wait-for-start", dest="wait_for_start", action="store_false", help="Return immediately after submission")
