@@ -5,6 +5,7 @@ Usage:
 """
 
 import argparse
+import csv
 import time
 from pathlib import Path
 
@@ -233,11 +234,29 @@ def main() -> None:
             print(f"  val: PSNR={eval_metrics.get('eval/psnr', 0):.2f}  SSIM={eval_metrics.get('eval/ssim', 0):.4f}")
             if eval_metrics["eval/psnr"] > best_val_psnr:
                 best_val_psnr = eval_metrics["eval/psnr"]
+                log_dict["is_best"] = 1
                 torch.save(model.state_dict(), args.save_dir / "model_best_val.pt")
                 print(f"  New best val PSNR; saved {args.save_dir / 'model_best_val.pt'}")
 
         if args.wandb_project and wandb is not None:
             wandb.log(log_dict)
+
+        if val_patches is not None:
+            row = {
+                "epoch": epoch,
+                "train_loss": avg_loss,
+                "val_loss": log_dict.get("val/loss", ""),
+                "val_psnr": log_dict.get("eval/psnr", ""),
+                "val_ssim": log_dict.get("eval/ssim", ""),
+                "is_best": log_dict.get("is_best", 0),
+            }
+            path_csv = args.save_dir / "val_metrics.csv"
+            write_header = not path_csv.is_file()
+            with path_csv.open("a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=list(row))
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
 
         if epoch % args.save_every == 0:
             ckpt_path = args.save_dir / f"model_epoch_{epoch}.pt"
