@@ -1,7 +1,5 @@
 _target_: agent.AgentConfig
 
-denoiser: null
-
 upsampler:
   _target_: models.diffusion.DenoiserConfig
   sigma_data: 0.5
@@ -28,7 +26,3 @@ upsampler:
     - 0
     - 0
     - 1
-
-rew_end_model: null
-
-actor_critic: null

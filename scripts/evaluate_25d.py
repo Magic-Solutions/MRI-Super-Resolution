@@ -29,7 +29,7 @@ from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 from agent import Agent
 from data.dataset import Dataset, MRIHdf5Dataset
-from envs.world_model_env import DiffusionSampler
+from models.diffusion import DiffusionSampler
 from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
 
@@ -71,7 +71,7 @@ def main() -> None:
     n_cond = cfg.agent.upsampler.inner_model.num_steps_conditioning
     up_mode = "bilinear" if device.type == "mps" else "bicubic"
 
-    sampler_cfg = instantiate(cfg.world_model_env.diffusion_sampler_upsampling)
+    sampler_cfg = instantiate(cfg.sampler)
     sampler_cfg.num_steps_denoising = args.num_steps
     sampler = DiffusionSampler(upsampler, sampler_cfg)
 

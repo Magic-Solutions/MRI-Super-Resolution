@@ -9,7 +9,6 @@ experiments
 checkpoints
 saved_runs
 dataset
-training_preview.mp4
 
 # MRI data (raw downloads + processed output)
 src/raw_data/FOMO60K/
@@ -26,8 +25,6 @@ __pycache__/
 .ipynb_checkpoints
 *.DS_Store
 *.hdf5
-*.mkv
-*.ndjson
 *.pt
 *.npy
 *.png
@@ -45,8 +42,3 @@ ACCESS_latex_template_20240429*/
 # Run artifacts
 runs/
 inference_output/
-
-# Infra / local state
-infra/pulumi-gcp/.venv/
-infra/pulumi-gcp/.pulumi/
-infra/pulumi-gcp/Pulumi.*.yaml

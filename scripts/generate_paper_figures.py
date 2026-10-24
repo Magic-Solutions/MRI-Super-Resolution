@@ -544,7 +544,7 @@ def fig_pixel_error_heatmap() -> None:
     from hydra.utils import instantiate
     from agent import Agent
     from data.dataset import Dataset, MRIHdf5Dataset
-    from envs.world_model_env import DiffusionSampler
+    from models.diffusion import DiffusionSampler
 
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     config_dir = str(REPO / "config")
@@ -563,7 +563,7 @@ def fig_pixel_error_heatmap() -> None:
     upsampler = agent.upsampler
     up_factor = upsampler.cfg.upsampling_factor
     n_cond = cfg.agent.upsampler.inner_model.num_steps_conditioning
-    sampler_cfg = instantiate(cfg.world_model_env.diffusion_sampler_upsampling)
+    sampler_cfg = instantiate(cfg.sampler)
     sampler_cfg.num_steps_denoising = 1
     sampler = DiffusionSampler(upsampler, sampler_cfg)
 

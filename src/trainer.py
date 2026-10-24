@@ -2,7 +2,6 @@ from functools import partial
 from pathlib import Path
 import shutil
 import time
-from typing import List, Optional, Tuple
 
 from hydra.utils import instantiate
 import numpy as np
@@ -10,30 +9,21 @@ from omegaconf import DictConfig, OmegaConf
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
 import wandb
 
 from agent import Agent
-try:
-    from depth_viz import colorize_inverse_depth_uint8
-except ImportError:
-    colorize_inverse_depth_uint8 = None
 from models.diffusion import DiffusionSampler
-from coroutines.collector import make_collector, NumToCollect
-from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, CSGOHdf5Dataset, MRIHdf5Dataset
-from envs import make_atari_env, WorldModelEnv
+from data import BatchSampler, collate_segments_to_batch, Dataset, DatasetTraverser, MRIHdf5Dataset
 from utils import (
-    broadcast_if_needed,
-    build_ddp_wrapper,
-    CommonTools,
     configure_opt,
     count_parameters,
     get_lr_sched,
     keep_agent_copies_every,
     Logs,
     move_opt_to,
-    process_confusion_matrices_if_any_and_compute_classification_metrics,
     save_info_for_import_script,
     save_with_backup,
     set_seed,
@@ -44,6 +34,8 @@ from utils import (
 
 
 class Trainer(StateDictMixin):
+    """Trains the 2.5D slice-conditioned EDM upsampler on static MRI slice datasets."""
+
     def __init__(self, cfg: DictConfig, root_dir: Path) -> None:
         torch.backends.cuda.matmul.allow_tf32 = True
         OmegaConf.resolve(cfg)
@@ -51,8 +43,8 @@ class Trainer(StateDictMixin):
         self._rank = dist.get_rank() if dist.is_initialized() else 0
         self._world_size = dist.get_world_size() if dist.is_initialized() else 1
 
-        # Pick a random seed
-        set_seed(torch.seed() % 10 ** 9)
+        # Seed (random when common.seed is null)
+        set_seed(cfg.common.seed if cfg.common.seed is not None else torch.seed() % 10 ** 9)
 
         # Device
         if torch.cuda.is_available():
@@ -82,10 +74,6 @@ class Trainer(StateDictMixin):
                     **wandb_init_kwargs,
                 )
             )
-
-        # Flags
-        self._is_static_dataset = cfg.static_dataset.path is not None
-        self._is_model_free = cfg.training.model_free
 
         # Checkpointing
         self._path_ckpt_dir = Path("checkpoints")
@@ -119,189 +107,55 @@ class Trainer(StateDictMixin):
 
             shutil.copytree(src=root_dir / "src", dst="./src", ignore=_ignore_runtime_data)
             shutil.copytree(src=root_dir / "scripts", dst="./scripts")
-        
-        def _resolve_path(path_like: str | Path | None) -> Path | None:
-            if path_like is None:
-                return None
+
+        def _resolve_path(path_like: str | Path) -> Path:
             p = Path(path_like).expanduser()
             return p if p.is_absolute() else (root_dir / p)
 
-        if cfg.env.train.id == "mri":
-            assert cfg.env.path_data_low_res is not None and cfg.env.path_data_full_res is not None
-            assert self._is_static_dataset
-            num_actions = cfg.env.num_actions
-            full_res_path = _resolve_path(cfg.env.path_data_full_res)
-            assert full_res_path is not None
-            dataset_full_res = MRIHdf5Dataset(full_res_path)
-
-        elif cfg.env.train.id == "csgo":
-            assert cfg.env.path_data_low_res is not None and cfg.env.path_data_full_res is not None, "Make sure to download CSGO data and set the relevant paths in cfg.env"
-            assert self._is_static_dataset
-            num_actions = cfg.env.num_actions
-            full_res_path = _resolve_path(cfg.env.path_data_full_res)
-            assert full_res_path is not None
-            dataset_full_res = CSGOHdf5Dataset(full_res_path)
-            expected_channels = int(cfg.agent.denoiser.inner_model.img_channels)
-            if dataset_full_res.num_channels != expected_channels:
-                raise ValueError(
-                    "Dataset/model channel mismatch: "
-                    f"full_res data has {dataset_full_res.num_channels} channels, "
-                    f"but cfg.agent.denoiser.inner_model.img_channels={expected_channels}. "
-                    "Regenerate processed data with matching --use-depth or update config use_depth."
-                )
-            if cfg.agent.upsampler is not None:
-                upsampler_channels = int(cfg.agent.upsampler.inner_model.img_channels)
-                if upsampler_channels != expected_channels:
-                    raise ValueError(
-                        "Inconsistent channel config: "
-                        f"denoiser expects {expected_channels} channels but upsampler expects {upsampler_channels}."
-                    )
-        
-        # Envs (atari only)
-        else:
-            if self._rank == 0:
-                train_env = make_atari_env(num_envs=cfg.collection.train.num_envs, device=self._device, **cfg.env.train)
-                test_env = make_atari_env(num_envs=cfg.collection.test.num_envs, device=self._device, **cfg.env.test)
-                num_actions = int(test_env.num_actions)
-            else:
-                num_actions = None
-            num_actions, = broadcast_if_needed(num_actions)
-            dataset_full_res = None
-    
+        # Datasets: low-res slice episodes paired with full-res HDF5 volumes
+        assert cfg.env.path_data_low_res is not None and cfg.env.path_data_full_res is not None
+        dataset_full_res = MRIHdf5Dataset(_resolve_path(cfg.env.path_data_full_res))
+        p = _resolve_path(cfg.env.path_data_low_res)
         num_workers = cfg.training.num_workers_data_loaders
         use_manager = cfg.training.cache_in_ram and (num_workers > 0)
-        if self._is_static_dataset:
-            resolved_static_path = _resolve_path(cfg.static_dataset.path)
-            assert resolved_static_path is not None
-            p = resolved_static_path
-        else:
-            p = Path("dataset")
         self.train_dataset = Dataset(p / "train", dataset_full_res, "train_dataset", cfg.training.cache_in_ram, use_manager)
         self.test_dataset = Dataset(p / "test", dataset_full_res, "test_dataset", cache_in_ram=True)
         self.train_dataset.load_from_default_path()
         self.test_dataset.load_from_default_path()
 
-        # Create models
-        self.agent = Agent(instantiate(cfg.agent, num_actions=num_actions)).to(self._device)
-        self._agent = build_ddp_wrapper(**self.agent._modules) if dist.is_initialized() else self.agent
+        # Model
+        self.agent = Agent(instantiate(cfg.agent, num_actions=0)).to(self._device)
+        self._upsampler = DDP(self.agent.upsampler) if dist.is_initialized() else self.agent.upsampler
 
         if cfg.initialization.path_to_ckpt is not None:
             self.agent.load(**cfg.initialization)
 
-        # Collectors
-        if not self._is_static_dataset and self._rank == 0:
-            self._train_collector = make_collector(
-                train_env, self.agent.actor_critic, self.train_dataset, cfg.collection.train.epsilon
-            )
-            self._test_collector = make_collector(
-                test_env, self.agent.actor_critic, self.test_dataset, cfg.collection.test.epsilon, reset_every_collect=True
-            )
-
-        ######################################################
-
-        # Optimizers and LR schedulers
-
-        def build_opt(name: str) -> torch.optim.AdamW:
-            return configure_opt(getattr(self.agent, name), **getattr(cfg, name).optimizer)
-
-        def build_lr_sched(name: str) -> torch.optim.lr_scheduler.LambdaLR:
-            return get_lr_sched(self.opt.get(name), getattr(cfg, name).training.lr_warmup_steps)
-
-        model_names = ["denoiser", "upsampler", "rew_end_model", "actor_critic"]
-        self._model_names = ["actor_critic"] if self._is_model_free else [name for name in model_names if getattr(self.agent, name) is not None]
-        
-        self.opt = CommonTools(**{name: build_opt(name) for name in self._model_names})
-        self.lr_sched = CommonTools(**{name: build_lr_sched(name) for name in self._model_names})
+        # Optimizer and LR scheduler
+        self.opt = configure_opt(self.agent.upsampler, **cfg.upsampler.optimizer)
+        self.lr_sched = get_lr_sched(self.opt, cfg.upsampler.training.lr_warmup_steps)
 
         # Data loaders
-
-        make_data_loader = partial(
-            DataLoader,
+        c = cfg.upsampler.training
+        seq_length = cfg.agent.upsampler.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
+        batch_sampler = BatchSampler(self.train_dataset, self._rank, self._world_size, c.batch_size, seq_length)
+        self._data_loader_train = DataLoader(
             dataset=self.train_dataset,
             collate_fn=collate_segments_to_batch,
             num_workers=num_workers,
             persistent_workers=(num_workers > 0),
             pin_memory=self._use_cuda,
             pin_memory_device=str(self._device) if self._use_cuda else "",
+            batch_sampler=batch_sampler,
         )
-
-        make_batch_sampler = partial(BatchSampler, self.train_dataset, self._rank, self._world_size)
-
-        def get_sample_weights(sample_weights: List[float]) -> Optional[List[float]]:
-            return None if (self._is_static_dataset and cfg.static_dataset.ignore_sample_weights) else sample_weights
-
-        if self.agent.denoiser is not None:
-            c = cfg.denoiser.training
-            seq_length = cfg.agent.denoiser.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
-            bs = make_batch_sampler(c.batch_size, seq_length, get_sample_weights(c.sample_weights))
-            dl_denoiser_train = make_data_loader(batch_sampler=bs)
-            dl_denoiser_test = DatasetTraverser(self.test_dataset, c.batch_size, seq_length)
-        else:
-            dl_denoiser_train = dl_denoiser_test = None
-
-        if self.agent.upsampler is not None:
-            c = cfg.upsampler.training
-            seq_length = cfg.agent.upsampler.inner_model.num_steps_conditioning + 1 + c.num_autoregressive_steps
-            bs = make_batch_sampler(c.batch_size, seq_length, get_sample_weights(c.sample_weights))
-            dl_upsampler_train = make_data_loader(batch_sampler=bs)
-            dl_upsampler_test = DatasetTraverser(self.test_dataset, c.batch_size, seq_length)
-        else:
-            dl_upsampler_train = dl_upsampler_test = None
-
-        if self.agent.rew_end_model is not None:
-            c = cfg.rew_end_model.training
-            bs = make_batch_sampler(c.batch_size, c.seq_length, get_sample_weights(c.sample_weights), can_sample_beyond_end=True)
-            dl_rew_end_model_train = make_data_loader(batch_sampler=bs)
-            dl_rew_end_model_test = DatasetTraverser(self.test_dataset, c.batch_size, c.seq_length)
-        else:
-            dl_rew_end_model_train = dl_rew_end_model_test = None
-
-        self._data_loader_train = CommonTools(
-            denoiser=dl_denoiser_train, upsampler=dl_upsampler_train,
-            rew_end_model=dl_rew_end_model_train, actor_critic=None,
-        )
-        self._data_loader_test = CommonTools(
-            denoiser=dl_denoiser_test, upsampler=dl_upsampler_test,
-            rew_end_model=dl_rew_end_model_test, actor_critic=None,
-        )
-
-        # RL env
-
-        if self.agent.actor_critic is not None:
-            actor_critic_loss_cfg = instantiate(cfg.actor_critic.actor_critic_loss)
-
-            if self._is_model_free:
-                assert self.agent.actor_critic is not None
-                rl_env = make_atari_env(num_envs=cfg.actor_critic.training.batch_size, device=self._device, **cfg.env.train)
-
-            else:
-                c = cfg.actor_critic.training
-                sl = cfg.agent.denoiser.inner_model.num_steps_conditioning
-                if self.agent.upsampler is not None:
-                    sl = max(sl, cfg.agent.upsampler.inner_model.num_steps_conditioning)
-                bs = make_batch_sampler(c.batch_size, sl, get_sample_weights(c.sample_weights))
-                dl_actor_critic = make_data_loader(batch_sampler=bs)
-                wm_env_cfg = instantiate(cfg.world_model_env)
-                rl_env = WorldModelEnv(self.agent.denoiser, self.agent.upsampler, self.agent.rew_end_model, dl_actor_critic, wm_env_cfg)
-
-                if cfg.training.compile_wm:
-                    rl_env.predict_next_obs = torch.compile(rl_env.predict_next_obs, mode="reduce-overhead")
-                    rl_env.predict_rew_end = torch.compile(rl_env.predict_rew_end, mode="reduce-overhead")
-        else:
-            actor_critic_loss_cfg = None
-            rl_env = None
+        self._data_loader_test = DatasetTraverser(self.test_dataset, c.batch_size, seq_length)
 
         # Setup training
-        sigma_distribution_cfg = instantiate(cfg.denoiser.sigma_distribution) if self.agent.denoiser is not None else None
-        sigma_distribution_cfg_upsampler = instantiate(cfg.upsampler.sigma_distribution) if self.agent.upsampler is not None else None
-        self.agent.setup_training(sigma_distribution_cfg, sigma_distribution_cfg_upsampler, actor_critic_loss_cfg, rl_env)
+        self.agent.setup_training(instantiate(cfg.upsampler.sigma_distribution))
 
         # Training state (things to be saved/restored)
         self.epoch = 0
-        self.num_epochs_collect = None
-        self.num_episodes_test = 0
-        self.num_batch_train = CommonTools(denoiser=0, upsampler=0, rew_end_model=0)
-        self.num_batch_test = CommonTools(denoiser=0, upsampler=0, rew_end_model=0)
+        self.num_batch_train = 0
+        self.num_batch_test = 0
 
         if cfg.common.resume:
             self.load_state_checkpoint()
@@ -309,160 +163,55 @@ class Trainer(StateDictMixin):
             self.save_checkpoint()
 
         if self._rank == 0:
-            for name in self._model_names:
-                print(f"{count_parameters(getattr(self.agent, name))} parameters in {name}")
+            print(f"{count_parameters(self.agent.upsampler)} parameters in upsampler")
             print(self.train_dataset)
             print(self.test_dataset)
 
     def run(self) -> None:
-        to_log = []
-
-        if self.epoch == 0:
-            if self._is_model_free or self._is_static_dataset:
-                self.num_epochs_collect = 0
-            else:
-                if self._rank == 0:
-                    self.num_epochs_collect, to_log_ = self.collect_initial_dataset()
-                    to_log += to_log_
-                self.num_epochs_collect, sd_train_dataset = broadcast_if_needed(self.num_epochs_collect, self.train_dataset.state_dict())
-                self.train_dataset.load_state_dict(sd_train_dataset)
-
-        num_epochs = self.num_epochs_collect + self._cfg.training.num_final_epochs
+        num_epochs = self._cfg.training.num_final_epochs
 
         while self.epoch < num_epochs:
             self.epoch += 1
             start_time = time.time()
+            to_log = []
 
             if self._rank == 0:
                 print(f"\nEpoch {self.epoch} / {num_epochs}\n")
 
             # Training
-            should_collect_train = (self._rank == 0 and not self._is_model_free and not self._is_static_dataset and self.epoch <= self.num_epochs_collect)
-
-            if should_collect_train:
-                c = self._cfg.collection.train
-                to_log += self._train_collector.send(NumToCollect(steps=c.steps_per_epoch))
-            sd_train_dataset, = broadcast_if_needed(self.train_dataset.state_dict())  # update dataset for ranks > 0
-            self.train_dataset.load_state_dict(sd_train_dataset)
-            
             if self._cfg.training.should:
-                to_log += self.train_agent()
+                to_log += self.train_upsampler()
 
             # Evaluation
             should_test = self._rank == 0 and self._cfg.evaluation.should and (self.epoch % self._cfg.evaluation.every == 0)
-            should_collect_test = should_test and not self._is_static_dataset
-
-            if should_collect_test:
-                to_log += self.collect_test()
-
-            if should_test and not self._is_model_free:
-                to_log += self.test_agent()
+            if should_test:
+                to_log += self.test_upsampler()
                 to_log += self.run_inference_samples()
 
             # Logging
             to_log.append({"duration": (time.time() - start_time) / 3600})
             if self._rank == 0:
                 wandb_log(to_log, self.epoch)
-            to_log = []
 
             # Checkpointing
             self.save_checkpoint()
-            
+
             if dist.is_initialized():
                 dist.barrier()
 
-        # Last collect
         if self._rank == 0:
-            if not self._is_static_dataset:
-                wandb_log(self.collect_test(final=True), self.epoch)
             wandb.finish()
 
-    def collect_initial_dataset(self) -> Tuple[int, Logs]:
-        print("\nInitial collect\n")
-        to_log = []
-        c = self._cfg.collection.train
-        min_steps = c.first_epoch.min
-        steps_per_epoch = c.steps_per_epoch
-        max_steps = c.first_epoch.max
-        threshold_rew = c.first_epoch.threshold_rew
-        assert min_steps % steps_per_epoch == 0
+    def train_upsampler(self) -> Logs:
+        cfg = self._cfg.upsampler.training
+        if self.epoch <= cfg.start_after_epochs:
+            return []
+        steps = cfg.steps_first_epoch if self.epoch == 1 else cfg.steps_per_epoch
 
-        steps = min_steps
-        while True:
-            to_log += self._train_collector.send(NumToCollect(steps=steps))
-            num_steps = self.train_dataset.num_steps
-            total_minority_rew = sum(sorted(self.train_dataset.counts_rew)[:-1])
-            if total_minority_rew >= threshold_rew:
-                break
-            if (max_steps is not None) and num_steps >= max_steps:
-                print("Reached the specified maximum for initial collect")
-                break
-            print(f"Minority reward: {total_minority_rew}/{threshold_rew} -> Keep collecting\n")
-            steps = steps_per_epoch
-
-        print("\nSummary of initial collect:")
-        print(f"Num steps: {num_steps} / {c.num_steps_total}")
-        print(f"Reward counts: {dict(self.train_dataset.counter_rew)}")
-
-        remaining_steps = c.num_steps_total - num_steps
-        assert remaining_steps % c.steps_per_epoch == 0
-        num_epochs_collect = remaining_steps // c.steps_per_epoch
-
-        return num_epochs_collect, to_log
-
-    def collect_test(self, final: bool = False) -> Logs:
-        c = self._cfg.collection.test
-        episodes = c.num_final_episodes if final else c.num_episodes
-        td = self.test_dataset
-        td.clear()
-        to_log = self._test_collector.send(NumToCollect(episodes=episodes))
-        key_ep_id = f"{td.name}/episode_id"
-        to_log = [{k: v + self.num_episodes_test if k == key_ep_id else v for k, v in x.items()} for x in to_log]
-
-        print(f"\nSummary of {'final' if final else 'test'} collect: {td.num_episodes} episodes ({td.num_steps} steps)")
-        keys = [key_ep_id, "return", "length"]
-        to_log_episodes = [x for x in to_log if set(x.keys()) == set(keys)]
-        episode_ids, returns, lengths = [[d[k] for d in to_log_episodes] for k in keys]
-        for i, (ep_id, ret, length) in enumerate(zip(episode_ids, returns, lengths)):
-            print(f"  Episode {ep_id}: return = {ret} length = {length}\n", end="\n" if i == episodes - 1 else "")
-
-        self.num_episodes_test += episodes
-
-        if final:
-            to_log.append({"final_return_mean": np.mean(returns), "final_return_std": np.std(returns)})
-            print(to_log[-1])
-
-        return to_log
-
-    def train_agent(self) -> Logs:
         self.agent.train()
         self.agent.zero_grad()
-        to_log = []
-        for name in self._model_names:
-            cfg = getattr(self._cfg, name).training
-            if self.epoch > cfg.start_after_epochs:
-                steps = cfg.steps_first_epoch if self.epoch == 1 else cfg.steps_per_epoch
-                to_log += self.train_component(name, steps)
-        return to_log
-
-    @torch.no_grad()
-    def test_agent(self) -> Logs:
-        self.agent.eval()
-        to_log = []
-        for name in self._model_names:
-            if name == "actor_critic":
-                continue
-            cfg = getattr(self._cfg, name).training
-            if self.epoch > cfg.start_after_epochs:
-                to_log += self.test_component(name)
-        return to_log
-
-    def train_component(self, name: str, steps: int) -> Logs:
-        cfg = getattr(self._cfg, name).training
-        model = getattr(self._agent, name)
-        opt = self.opt.get(name)
-        lr_sched = self.lr_sched.get(name)
-        data_loader = self._data_loader_train.get(name)
+        model = self._upsampler
+        opt = self.opt
         debug_step_logs = bool(getattr(self._cfg.training, "debug_step_logs", False))
         debug_every = int(getattr(self._cfg.training, "debug_log_every_n_steps", 1))
 
@@ -472,7 +221,7 @@ class Trainer(StateDictMixin):
 
         model.train()
         opt.zero_grad()
-        data_iterator = iter(data_loader) if data_loader is not None else None
+        data_iterator = iter(self._data_loader_train)
         to_log = []
         train_start = time.time()
         next_wandb_heartbeat = train_start + self._wandb_heartbeat_interval_s
@@ -480,14 +229,13 @@ class Trainer(StateDictMixin):
 
         num_steps = cfg.grad_acc_steps * steps
 
-        for i in trange(num_steps, desc=f"Training {name}", disable=self._rank > 0):
-            batch = next(data_iterator).to(self._device) if data_iterator is not None else None
-            loss, metrics = model(batch) if batch is not None else model()
+        for i in trange(num_steps, desc="Training upsampler", disable=self._rank > 0):
+            batch = next(data_iterator).to(self._device)
+            loss, metrics = model(batch)
             loss.backward()
 
-            num_batch = self.num_batch_train.get(name)
-            metrics[f"num_batch_train_{name}"] = num_batch
-            self.num_batch_train.set(name, num_batch + 1)
+            metrics["num_batch_train_upsampler"] = self.num_batch_train
+            self.num_batch_train += 1
 
             if (i + 1) % cfg.grad_acc_steps == 0:
                 if cfg.max_grad_norm is not None:
@@ -498,9 +246,8 @@ class Trainer(StateDictMixin):
                 opt.zero_grad()
                 num_optimizer_updates += 1
 
-                if lr_sched is not None:
-                    metrics["lr"] = lr_sched.get_last_lr()[0]
-                    lr_sched.step()
+                metrics["lr"] = self.lr_sched.get_last_lr()[0]
+                self.lr_sched.step()
 
                 if self._rank == 0 and self._wandb_heartbeat_interval_s > 0:
                     now = time.time()
@@ -508,9 +255,9 @@ class Trainer(StateDictMixin):
                         wandb.log(
                             {
                                 "epoch": self.epoch,
-                                f"{name}/train/progress": (i + 1) / max(num_steps, 1),
-                                f"{name}/train/optimizer_updates": num_optimizer_updates,
-                                f"{name}/train/elapsed_minutes": (now - train_start) / 60.0,
+                                "upsampler/train/progress": (i + 1) / max(num_steps, 1),
+                                "upsampler/train/optimizer_updates": num_optimizer_updates,
+                                "upsampler/train/elapsed_minutes": (now - train_start) / 60.0,
                             }
                         )
                         next_wandb_heartbeat = now + self._wandb_heartbeat_interval_s
@@ -518,17 +265,13 @@ class Trainer(StateDictMixin):
             to_log.append(metrics)
 
             if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
-                shape_obs = tuple(batch.obs.shape) if batch is not None else None
-                shape_act = tuple(batch.act.shape) if (batch is not None and batch.act is not None) else None
                 numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
                 print(
-                    f"[debug][train][{name}] epoch={self.epoch} step={i + 1}/{num_steps} "
-                    f"loss={loss.item():.6f} obs_shape={shape_obs} act_shape={shape_act} "
-                    f"metrics={numeric_metrics}"
+                    f"[debug][train][upsampler] epoch={self.epoch} step={i + 1}/{num_steps} "
+                    f"loss={loss.item():.6f} obs_shape={tuple(batch.obs.shape)} metrics={numeric_metrics}"
                 )
 
-        process_confusion_matrices_if_any_and_compute_classification_metrics(to_log)
-        to_log = [{f"{name}/train/{k}": v for k, v in d.items()} for d in to_log]
+        to_log = [{f"upsampler/train/{k}": v for k, v in d.items()} for d in to_log]
 
         model.to("cpu")
         move_opt_to(opt, "cpu")
@@ -536,35 +279,32 @@ class Trainer(StateDictMixin):
         return to_log
 
     @torch.no_grad()
-    def test_component(self, name: str) -> Logs:
-        model = getattr(self.agent, name)
-        data_loader = self._data_loader_test.get(name)
+    def test_upsampler(self) -> Logs:
+        if self.epoch <= self._cfg.upsampler.training.start_after_epochs:
+            return []
+        self.agent.eval()
+        model = self.agent.upsampler
         max_batches = getattr(self._cfg.evaluation, "max_test_batches", None)
         debug_step_logs = bool(getattr(self._cfg.training, "debug_step_logs", False))
         debug_every = int(getattr(self._cfg.training, "debug_log_every_n_steps", 1))
         model.eval()
         model.to(self._device)
         raw_metrics = []
-        for i, batch in enumerate(tqdm(data_loader, desc=f"Evaluating {name}")):
+        for i, batch in enumerate(tqdm(self._data_loader_test, desc="Evaluating upsampler")):
             if max_batches is not None and i >= max_batches:
                 break
             batch = batch.to(self._device)
             _, metrics = model(batch)
-            num_batch = self.num_batch_test.get(name)
-            metrics[f"num_batch_test_{name}"] = num_batch
-            self.num_batch_test.set(name, num_batch + 1)
+            metrics["num_batch_test_upsampler"] = self.num_batch_test
+            self.num_batch_test += 1
             raw_metrics.append(metrics)
 
             if debug_step_logs and self._rank == 0 and ((i + 1) % max(debug_every, 1) == 0):
-                shape_obs = tuple(batch.obs.shape)
-                shape_act = tuple(batch.act.shape) if batch.act is not None else None
                 numeric_metrics = {k: v for k, v in metrics.items() if isinstance(v, (int, float))}
                 print(
-                    f"[debug][test][{name}] epoch={self.epoch} batch={i + 1} "
-                    f"obs_shape={shape_obs} act_shape={shape_act} metrics={numeric_metrics}"
+                    f"[debug][test][upsampler] epoch={self.epoch} batch={i + 1} "
+                    f"obs_shape={tuple(batch.obs.shape)} metrics={numeric_metrics}"
                 )
-
-        process_confusion_matrices_if_any_and_compute_classification_metrics(raw_metrics)
 
         summary = {}
         if raw_metrics:
@@ -572,59 +312,32 @@ class Trainer(StateDictMixin):
             for k in numeric_keys:
                 vals = [m[k] for m in raw_metrics if k in m and isinstance(m[k], (int, float))]
                 if vals:
-                    summary[f"{name}/test/{k}"] = sum(vals) / len(vals)
+                    summary[f"upsampler/test/{k}"] = sum(vals) / len(vals)
 
         model.to("cpu")
         return [summary] if summary else []
 
     @torch.no_grad()
     def run_inference_samples(self) -> Logs:
-        """Run autoregressive inference on test data and log comparison images to W&B."""
+        """Super-resolve a few test slices and log GT / generated / bicubic grids to W&B."""
         cfg = self._cfg
         num_samples = cfg.evaluation.num_inference_samples
-        num_gen_steps = cfg.evaluation.num_inference_steps
         up_mode = "bilinear" if self._device.type == "mps" else "bicubic"
 
-        denoiser = self.agent.denoiser
         upsampler = self.agent.upsampler
+        upsampler.eval().to(self._device)
+        sampler_up = DiffusionSampler(upsampler, instantiate(cfg.sampler))
+        n_cond_up = cfg.agent.upsampler.inner_model.num_steps_conditioning
+        up_factor = upsampler.cfg.upsampling_factor
 
-        if denoiser is not None:
-            denoiser.eval().to(self._device)
-        if upsampler is not None:
-            upsampler.eval().to(self._device)
-
-        sampler_next_obs = None
-        if denoiser is not None:
-            sampler_next_obs = DiffusionSampler(
-                denoiser, instantiate(cfg.world_model_env.diffusion_sampler_next_obs),
-            )
-
-        sampler_up = None
-        if upsampler is not None:
-            sampler_up = DiffusionSampler(
-                upsampler, instantiate(cfg.world_model_env.diffusion_sampler_upsampling),
-            )
-            n_cond_up = cfg.agent.upsampler.inner_model.num_steps_conditioning
-            up_factor = upsampler.cfg.upsampling_factor
-
-        if denoiser is not None:
-            n_cond = cfg.agent.denoiser.inner_model.num_steps_conditioning
-        elif upsampler is not None:
-            n_cond = n_cond_up
-        else:
-            return []
-
-        seq_length = n_cond + 1 + num_gen_steps
+        seq_length = n_cond_up + 1 + cfg.evaluation.num_inference_steps
         traverser = DatasetTraverser(self.test_dataset, 1, seq_length)
 
         to_log = []
         sample_count = 0
 
-        def frame_to_uint8(t):
-            return t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu()
-
         def to_grayscale_or_rgb(t):
-            img = frame_to_uint8(t)
+            img = t.clamp(-1, 1).add(1).div(2).mul(255).byte().cpu()
             if img.shape[0] == 1:
                 img = img.expand(3, -1, -1)
             elif img.shape[0] >= 4:
@@ -651,135 +364,50 @@ class Trainer(StateDictMixin):
                 break
 
             batch = batch.to(self._device)
+            has_hr = bool(batch.info and isinstance(batch.info[0], dict) and "full_res" in batch.info[0])
+            if not has_hr:
+                continue
+
             obs_lr = batch.obs
-            act = batch.act
-            mask = batch.mask_padding[0]
+            obs_hr = batch.info[0]["full_res"].to(self._device)
+            if obs_hr.ndim == 4:
+                obs_hr = obs_hr.unsqueeze(0)
 
-            has_hr = (
-                batch.info
-                and batch.info[0]
-                and isinstance(batch.info[0], dict)
-                and "full_res" in batch.info[0]
-            )
-            obs_hr = None
-            if has_hr:
-                obs_hr = batch.info[0]["full_res"].to(self._device)
-                if obs_hr.ndim == 4:
-                    obs_hr = obs_hr.unsqueeze(0)
+            b, t, c, h, w = obs_lr.shape
+            vis_count = min(6, t)
+            vis_idx = [int(i) for i in torch.linspace(0, t - 1, vis_count).long()]
 
-            # Upsampler-only mode: run upsampler on each LR slice
-            if sampler_next_obs is None and sampler_up is not None and has_hr:
-                b, t, c, h, w = obs_lr.shape
-                vis_count = min(6, t)
-                vis_idx = [int(i) for i in torch.linspace(0, t - 1, vis_count).long()]
+            gen_hr_frames = []
+            for i in vis_idx:
+                context_start = max(0, i - n_cond_up)
+                context_slices = obs_lr[:, context_start:i]
+                if context_slices.size(1) < n_cond_up:
+                    pad = n_cond_up - context_slices.size(1)
+                    context_slices = F.pad(context_slices, [0, 0, 0, 0, 0, 0, pad, 0])
+                low_up = F.interpolate(obs_lr[:, i], scale_factor=up_factor, mode=up_mode).unsqueeze(1)
+                context_hr = F.interpolate(
+                    context_slices.reshape(-1, c, h, w), scale_factor=up_factor, mode=up_mode,
+                ).reshape(1, n_cond_up, c, up_factor * h, up_factor * w)
+                prev = torch.cat((context_hr, low_up), dim=1)
+                sr_frame, _ = sampler_up.sample(prev, None)
+                gen_hr_frames.append(sr_frame[0])
 
-                gen_hr_frames = []
-                for i in vis_idx:
-                    context_start = max(0, i - n_cond_up)
-                    context_end = i
-                    context_slices = obs_lr[:, context_start:context_end]
-                    if context_slices.size(1) < n_cond_up:
-                        pad = n_cond_up - context_slices.size(1)
-                        context_slices = F.pad(context_slices, [0, 0, 0, 0, 0, 0, pad, 0])
-                    low_up = F.interpolate(
-                        obs_lr[:, i], scale_factor=up_factor, mode=up_mode,
-                    ).unsqueeze(1)
-                    context_hr = F.interpolate(
-                        context_slices.reshape(-1, c, h, w), scale_factor=up_factor, mode=up_mode,
-                    ).reshape(1, n_cond_up, c, up_factor * h, up_factor * w)
-                    prev = torch.cat((context_hr, low_up), dim=1)
-                    sr_frame, _ = sampler_up.sample(prev, None)
-                    gen_hr_frames.append(sr_frame[0])
+            gt_imgs = [to_grayscale_or_rgb(obs_hr[0, i]) for i in vis_idx]
+            gen_imgs = [to_grayscale_or_rgb(f) for f in gen_hr_frames]
+            lr_imgs = [to_grayscale_or_rgb(
+                F.interpolate(obs_lr[:, i], scale_factor=up_factor, mode=up_mode)[0]
+            ) for i in vis_idx]
 
-                gt_imgs = [to_grayscale_or_rgb(obs_hr[0, i]) for i in vis_idx]
-                gen_imgs = [to_grayscale_or_rgb(f) for f in gen_hr_frames]
-                lr_imgs = [to_grayscale_or_rgb(
-                    F.interpolate(obs_lr[:, i], scale_factor=up_factor, mode=up_mode)[0]
-                ) for i in vis_idx]
-
-                grid = make_grid([gt_imgs, gen_imgs, lr_imgs])
-                frame_labels = ", ".join(str(i) for i in vis_idx)
-                to_log.append({
-                    f"inference/sample_{sample_count}": wandb.Image(
-                        grid, caption=f"Top: GT HR | Mid: Generated HR | Bottom: Bicubic LR | slices: {frame_labels}",
-                    ),
-                })
-                sample_count += 1
-                continue
-
-            # Legacy denoiser + upsampler autoregressive mode
-            if sampler_next_obs is None:
-                continue
-
-            n_valid = mask.sum().item()
-            n_gen = min(num_gen_steps, n_valid - n_cond)
-            if n_gen <= 0:
-                continue
-
-            obs_buf = obs_lr[:, :n_cond].clone()
-            act_buf = act[:, :n_cond].clone() if act is not None else None
-            gen_lr = list(obs_buf[0])
-
-            if sampler_up is not None and has_hr:
-                obs_hr_buf = obs_hr[:, :n_cond].clone()
-                gen_hr_list = list(obs_hr_buf[0])
-            else:
-                gen_hr_list = None
-
-            for step in range(n_gen):
-                next_lr, _ = sampler_next_obs.sample(obs_buf, act_buf)
-                gen_lr.append(next_lr[0])
-
-                if sampler_up is not None and has_hr:
-                    low_up = F.interpolate(
-                        next_lr, scale_factor=up_factor, mode=up_mode,
-                    ).unsqueeze(1)
-                    next_hr, _ = sampler_up.sample(
-                        torch.cat((obs_hr_buf[:, -n_cond_up:], low_up), dim=1), None,
-                    )
-                    gen_hr_list.append(next_hr[0])
-                    obs_hr_buf = obs_hr_buf.roll(-1, dims=1)
-                    obs_hr_buf[:, -1] = next_hr
-
-                obs_buf = obs_buf.roll(-1, dims=1)
-                obs_buf[:, -1] = next_lr
-                if act_buf is not None:
-                    act_buf = act_buf.roll(-1, dims=1)
-                    t_idx = n_cond + step
-                    if t_idx < act.size(1):
-                        act_buf[:, -1] = act[:, t_idx]
-
-            total = len(gen_lr)
-            vis_idx = sorted(set([
-                n_cond - 1, n_cond,
-                n_cond + max(1, n_gen // 4),
-                n_cond + n_gen // 2,
-                total - 1,
-            ]))
-            vis_idx = [i for i in vis_idx if i < total and i < obs_lr.size(1)]
-
-            if gen_hr_list is not None:
-                src_gt, src_gen, res_label = obs_hr[0], gen_hr_list, "HR"
-            else:
-                src_gt, src_gen, res_label = obs_lr[0], gen_lr, "LR"
-
-            gt_rgb = [to_grayscale_or_rgb(src_gt[i]) for i in vis_idx]
-            gen_rgb = [to_grayscale_or_rgb(src_gen[i]) for i in vis_idx]
-
+            grid = make_grid([gt_imgs, gen_imgs, lr_imgs])
             frame_labels = ", ".join(str(i) for i in vis_idx)
-            grid = make_grid([gt_rgb, gen_rgb])
             to_log.append({
                 f"inference/sample_{sample_count}": wandb.Image(
-                    grid, caption=f"({res_label}) Top: GT | Bottom: Gen | frames: {frame_labels}",
+                    grid, caption=f"Top: GT HR | Mid: Generated HR | Bottom: Bicubic LR | slices: {frame_labels}",
                 ),
             })
             sample_count += 1
 
-        if denoiser is not None:
-            denoiser.to("cpu")
-        if upsampler is not None:
-            upsampler.to("cpu")
-
+        upsampler.to("cpu")
         return to_log
 
     def load_state_checkpoint(self) -> None:

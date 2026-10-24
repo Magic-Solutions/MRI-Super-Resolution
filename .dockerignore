@@ -15,15 +15,7 @@ checkpoints/
 saved_runs/
 experiments/
 dataset/
-training_preview.mp4
 *.hdf5
-*.mkv
-*.ndjson
 *.pt
 *.npy
 *.png
-
-# Local infra/dev env
-infra/pulumi-gcp/.venv/
-infra/pulumi-gcp/.pulumi/
-infra/pulumi-gcp/Pulumi.*.yaml

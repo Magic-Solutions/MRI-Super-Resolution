@@ -1,53 +1,18 @@
 
-from argparse import Namespace
 from collections import OrderedDict
-from dataclasses import dataclass
 from functools import partial
 import json
 from pathlib import Path
 import random
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from omegaconf import OmegaConf
 import numpy as np
 import torch
-import torch.distributed as dist
 from torch import Tensor
 from torch.optim.lr_scheduler import LambdaLR
 import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 import wandb
-
-
-ATARI_100K_GAMES = [
-    "Alien",
-    "Amidar",
-    "Assault",
-    "Asterix",
-    "BankHeist",
-    "BattleZone",
-    "Boxing",
-    "Breakout",
-    "ChopperCommand",
-    "CrazyClimber",
-    "DemonAttack",
-    "Freeway",
-    "Frostbite",
-    "Gopher",
-    "Hero",
-    "Jamesbond",
-    "Kangaroo",
-    "Krull",
-    "KungFuMaster",
-    "MsPacman",
-    "Pong",
-    "PrivateEye",
-    "Qbert",
-    "RoadRunner",
-    "Seaquest",
-    "UpNDown",
-]
 
 
 Logs = List[Dict[str, float]]
@@ -79,52 +44,6 @@ class StateDictMixin:
         assert set(list(state_dict.keys())) == self._all_fields
         for k, v in state_dict.items():
             self._set_field(k, v)
-
-
-@dataclass
-class CommonTools(StateDictMixin):
-    denoiser: Optional[Any] = None
-    upsampler: Optional[Any] = None
-    rew_end_model: Optional[Any] = None
-    actor_critic: Optional[Any] = None
-
-    def get(self, name: str) -> Any:
-        return getattr(self, name)
-
-    def set(self, name: str, value: Any):
-        return setattr(self, name, value)
-
-
-def broadcast_if_needed(*args):
-    objects = list(args)
-    if dist.is_initialized():
-        dist.broadcast_object_list(objects, src=0) 
-        # the list `objects` now contains the version of rank 0
-    return objects
-
-
-def build_ddp_wrapper(**modules_dict: Dict[str, nn.Module]) -> Namespace:
-    return Namespace(**{name: DDP(module) for name, module in modules_dict.items()})
-
-
-def compute_classification_metrics(confusion_matrix: Tensor) -> Tuple[Tensor, Tensor, Tensor]:
-    num_classes = confusion_matrix.size(0)
-    precision = torch.zeros(num_classes)
-    recall = torch.zeros(num_classes)
-    f1_score = torch.zeros(num_classes)
-
-    for i in range(num_classes):
-        true_positive = confusion_matrix[i, i].item()
-        false_positive = confusion_matrix[:, i].sum().item() - true_positive
-        false_negative = confusion_matrix[i, :].sum().item() - true_positive
-
-        precision[i] = true_positive / (true_positive + false_positive) if (true_positive + false_positive) != 0 else 0
-        recall[i] = true_positive / (true_positive + false_negative) if (true_positive + false_negative) != 0 else 0
-        f1_score[i] = (
-            2 * (precision[i] * recall[i]) / (precision[i] + recall[i]) if (precision[i] + recall[i]) != 0 else 0
-        )
-
-    return precision, recall, f1_score
 
 
 def configure_opt(model: nn.Module, lr: float, weight_decay: float, eps: float, *blacklist_module_names: str) -> AdamW:
@@ -182,21 +101,6 @@ def get_lr_sched(opt: torch.optim.Optimizer, num_warmup_steps: int) -> LambdaLR:
     return LambdaLR(opt, lr_lambda, last_epoch=-1)
 
 
-def init_lstm(model: nn.Module) -> None:
-    for name, p in model.named_parameters():
-        if "weight_ih" in name:
-            nn.init.xavier_uniform_(p.data)
-        elif "weight_hh" in name:
-            nn.init.orthogonal_(p.data)
-        elif "bias_ih" in name:
-            p.data.fill_(0)
-            # Set forget-gate bias to 1
-            n = p.size(0)
-            p.data[(n // 4) : (n // 2)].fill_(1)
-        elif "bias_hh" in name:
-            p.data.fill_(0)
-
-
 def get_path_agent_ckpt(path_ckpt_dir: Union[str, Path], epoch: int, num_zeros: int = 5) -> Path:
     d = Path(path_ckpt_dir) / "agent_versions"
     if epoch >= 0:
@@ -236,52 +140,6 @@ def move_opt_to(opt: AdamW, device: torch.device):
         for metric_name, metric in optimizer_metrics.items():
             if torch.is_tensor(metric) and metric_name != "step":
                 optimizer_metrics[metric_name] = metric.to(device)
-
-
-def process_confusion_matrices_if_any_and_compute_classification_metrics(logs: Logs) -> None:
-    cm = [x.pop("confusion_matrix") for x in logs if "confusion_matrix" in x]
-    if len(cm) > 0:
-        confusion_matrices = {k: sum([d[k] for d in cm]) for k in cm[0]}  # accumulate confusion matrices
-        metrics = {}
-        for key, confusion_matrix in confusion_matrices.items():
-            precision, recall, f1_score = compute_classification_metrics(confusion_matrix)
-            metrics.update(
-                {
-                    **{f"classification_metrics/{key}_precision_class_{i}": v for i, v in enumerate(precision)},
-                    **{f"classification_metrics/{key}_recall_class_{i}": v for i, v in enumerate(recall)},
-                    **{f"classification_metrics/{key}_f1_score_class_{i}": v for i, v in enumerate(f1_score)},
-                }
-            )
-
-        logs.append(metrics)  # Append the obtained metrics to logs (in place)
-
-
-def prompt_atari_game():
-    for i, game in enumerate(ATARI_100K_GAMES):
-        print(f"{i:2d}: {game}")
-    while True:
-        x = input("\nEnter a number: ")
-        if not x.isdigit():
-            print("Invalid.")
-            continue
-        x = int(x)
-        if x < 0 or x > 25:
-            print("Invalid.")
-            continue
-        break
-    game = ATARI_100K_GAMES[x]
-    return game
-
-
-def prompt_run_name(game):
-    cfg_file = Path("config/trainer.yaml")
-    cfg_name = OmegaConf.load(cfg_file).wandb.name
-    suffix = f"-{cfg_name}" if cfg_name is not None else ""
-    name = game + suffix
-    name_ = input(f"Confirm run name by pressing Enter (or enter a new name): {name}\n")
-    if name_ != "":
-        name = name_
-    return name
 
 
 def save_info_for_import_script(epoch: int, run_name: str, path_ckpt_dir: Path) -> None:
