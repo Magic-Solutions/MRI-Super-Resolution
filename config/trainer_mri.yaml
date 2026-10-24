@@ -55,8 +55,8 @@ upsampler:
     steps_first_epoch: 400
     steps_per_epoch: 400
     sample_weights: null
-    batch_size: 8
-    grad_acc_steps: 4
+    batch_size: 4  # 8 runs out of memory on one L4; 4 x 8 is what the March runs and the paper used
+    grad_acc_steps: 8
     lr_warmup_steps: 100
     max_grad_norm: 10.0
 
