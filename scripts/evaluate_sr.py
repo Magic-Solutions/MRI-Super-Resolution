@@ -244,12 +244,19 @@ def main() -> None:
     fields = ["method", "subject", "slice", "psnr", "psnr_fg", "ssim", "fg_fraction"] + (["lpips"] if args.lpips else [])
     t0 = time.time()
     n_slices = n_blank = 0
+    inference_seconds = []
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats()
     with args.out.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for subject, lr, hr in load_volumes(args.data_dir, args.max_volumes):
             torch.manual_seed(args.seed)
+            t_volume = time.time()
             pred = method.predict_volume(lr).clamp(-1, 1)
+            if device.type == "cuda":
+                torch.cuda.synchronize()
+            inference_seconds.append(time.time() - t_volume)
             psnrs = []
             for si in range(hr.size(0)):
                 p, h = pred[si : si + 1], hr[si : si + 1]
@@ -268,8 +275,12 @@ def main() -> None:
     elapsed = time.time() - t0
     print(f"Wrote {n_slices} slices ({n_blank} all-zero HR slices skipped) to {args.out} in {elapsed:.0f}s")
     settings = {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()}
+    model = getattr(method, "upsampler", None) or getattr(method, "model", None)
     settings.update(name=name, device=str(device), git_sha=git_sha(), seconds=round(elapsed, 1),
-                    num_slices=n_slices, num_blank_skipped=n_blank)
+                    num_slices=n_slices, num_blank_skipped=n_blank,
+                    num_parameters=sum(p.numel() for p in model.parameters()) if model is not None else 0,
+                    inference_seconds_per_volume=round(float(np.mean(inference_seconds)), 3),
+                    peak_gpu_memory_gb=round(torch.cuda.max_memory_allocated() / 1e9, 3) if device.type == "cuda" else None)
     args.out.with_suffix(".json").write_text(json.dumps(settings, indent=2) + "\n")
 
 
