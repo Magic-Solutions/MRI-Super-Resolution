@@ -11,7 +11,7 @@ Usage:
     python src/train_swin2sr.py --arch swin2sr \
         --lr-train <lr_dir>/train --hr-train <hr_dir>/train \
         --lr-test <lr_dir>/test --hr-test <hr_dir>/test \
-        --epochs 20 --batch-size 16 --lr 2e-4
+        --epochs 20 --lr 2e-4
 
 On Vertex, EDSR goes through the same job script:
     launch_vertex_training.py --mode swin2sr --train-swin2sr-args "--arch edsr"
@@ -194,9 +194,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr-test", type=Path, default=None, help="LR validation directory (never the held-out test set)")
     parser.add_argument("--hr-test", type=Path, default=None, help="HR validation directory")
     parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=4, help="Swin2SR runs out of memory at 16 on one L4")
     parser.add_argument("--lr", type=float, default=2e-4)
-    parser.add_argument("--grad-acc-steps", type=int, default=1)
+    parser.add_argument("--grad-acc-steps", type=int, default=4)
     parser.add_argument("--eval-every", type=int, default=1, help="Validate every N epochs")
     parser.add_argument("--eval-slices-per-volume", type=int, default=16)
     parser.add_argument("--eval-lpips", action="store_true", help="Also compute LPIPS during validation")
