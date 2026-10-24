@@ -23,6 +23,7 @@ from models.diffusion.denoiser_3d import Denoiser3d, Denoiser3dConfig
 from models.diffusion.inner_model_3d import InnerModel3dConfig
 from models.diffusion.denoiser import SigmaDistributionConfig
 from data.dataset_3d import MRIVolumeDataset3d
+from models.diffusion.patchwise_3d import patchwise_sample
 from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
 
@@ -87,57 +88,6 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def patchwise_sample(
-    model: Denoiser3d,
-    lr_vol: torch.Tensor,
-    device: torch.device,
-    patch_size: int,
-    overlap: int,
-    uf: int,
-    num_steps: int,
-) -> torch.Tensor:
-    """Run patch-based 3D inference with overlap blending."""
-    _, _, d, h, w = lr_vol.shape
-    stride = patch_size - overlap
-    hr_d, hr_h, hr_w = d, h * uf, w * uf
-
-    output = torch.zeros(1, 1, hr_d, hr_h, hr_w)
-    counts = torch.zeros(1, 1, hr_d, hr_h, hr_w)
-
-    d_starts = list(range(0, max(d - patch_size, 0) + 1, stride))
-    if d_starts[-1] + patch_size < d:
-        d_starts.append(d - patch_size)
-    h_starts = list(range(0, max(h - patch_size, 0) + 1, stride))
-    if h_starts[-1] + patch_size < h:
-        h_starts.append(h - patch_size)
-    w_starts = list(range(0, max(w - patch_size, 0) + 1, stride))
-    if w_starts[-1] + patch_size < w:
-        w_starts.append(w - patch_size)
-
-    total_patches = len(d_starts) * len(h_starts) * len(w_starts)
-    patch_idx = 0
-
-    for ds in d_starts:
-        for hs in h_starts:
-            for ws in w_starts:
-                de = min(ds + patch_size, d)
-                he = min(hs + patch_size, h)
-                we = min(ws + patch_size, w)
-
-                lr_patch = lr_vol[:, :, ds:de, hs:he, ws:we].to(device)
-                pred_patch = model.sample(lr_patch, num_steps=num_steps).cpu()
-
-                output[:, :, ds:de, hs * uf:he * uf, ws * uf:we * uf] += pred_patch
-                counts[:, :, ds:de, hs * uf:he * uf, ws * uf:we * uf] += 1
-
-                patch_idx += 1
-                if patch_idx % 10 == 0 or patch_idx == total_patches:
-                    print(f"    patch {patch_idx}/{total_patches}")
-
-    counts = counts.clamp(min=1)
-    return output / counts
-
-
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else ("mps" if torch.backends.mps.is_available() else "cpu"))
@@ -186,9 +136,13 @@ def main() -> None:
         slice_psnrs, slice_ssims, slice_lpips = [], [], []
         slice_bpsnrs, slice_bssims, slice_blpips = [], [], []
         for si in range(d):
-            p_s = pred_hr_cpu[:, :, si:si+1]
-            h_s = hr_vol_cpu[:, :, si:si+1]
-            t_s = trilinear_cpu[:, :, si:si+1]
+            # Index (not slice) the depth axis so each slice is a 4-D (B, C, H, W)
+            # tensor. A (B, C, 1, H, W) slice makes metrics.ssim run a 3-D window
+            # over zero-padded depth, which inflates SSIM and is not comparable
+            # with the 2-D SSIM used for the 2.5D model and the baselines.
+            p_s = pred_hr_cpu[:, :, si]
+            h_s = hr_vol_cpu[:, :, si]
+            t_s = trilinear_cpu[:, :, si]
             slice_psnrs.append(compute_psnr(p_s, h_s))
             slice_ssims.append(compute_ssim(p_s, h_s))
             slice_lpips.append(compute_lpips(p_s, h_s))

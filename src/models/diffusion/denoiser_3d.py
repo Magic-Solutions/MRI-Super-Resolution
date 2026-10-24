@@ -14,6 +14,7 @@ import torch.nn.functional as F
 
 from .inner_model_3d import InnerModel3d, InnerModel3dConfig
 from .denoiser import SigmaDistributionConfig
+from .edm_sampler import EDMSamplerConfig, edm_sample
 
 
 def add_dims(input: Tensor, n: int) -> Tensor:
@@ -131,6 +132,8 @@ class Denoiser3d(nn.Module):
         sigma_min: float = 2e-3,
         sigma_max: float = 5.0,
         rho: int = 7,
+        order: int = 1,
+        sampler_cfg: Optional[EDMSamplerConfig] = None,
     ) -> Tensor:
         """Generate HR volume from LR via iterative denoising."""
         b, c, vol_d, h, w = lr_volume.shape
@@ -139,16 +142,7 @@ class Denoiser3d(nn.Module):
             lr_volume, size=(vol_d, h * uf, w * uf),
             mode="trilinear", align_corners=False,
         )
-
-        min_inv_rho = sigma_min ** (1 / rho)
-        max_inv_rho = sigma_max ** (1 / rho)
-        l = torch.linspace(0, 1, num_steps, device=self.device)
-        sigmas = (max_inv_rho + l * (min_inv_rho - max_inv_rho)) ** rho
-        sigmas = torch.cat((sigmas, sigmas.new_zeros(1)))
-
-        x = torch.randn(b, c, vol_d, uf * h, uf * w, device=self.device)
-        for sigma_cur, sigma_next in zip(sigmas[:-1], sigmas[1:]):
-            denoised = self.denoise(x, sigma_cur.expand(b), lr_up)
-            d_cur = (x - denoised) / sigma_cur
-            x = x + d_cur * (sigma_next - sigma_cur)
-        return x
+        if sampler_cfg is None:
+            sampler_cfg = EDMSamplerConfig(num_steps, sigma_min, sigma_max, rho, order)
+        shape = torch.Size((b, c, vol_d, uf * h, uf * w))
+        return edm_sample(lambda x, sigma: self.denoise(x, sigma, lr_up), shape, sampler_cfg, self.device)

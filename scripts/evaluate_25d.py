@@ -30,6 +30,7 @@ from hydra.utils import instantiate
 from agent import Agent
 from data.dataset import Dataset, MRIHdf5Dataset
 from models.diffusion import DiffusionSampler
+from models.diffusion.edm_sampler import EDMSamplerConfig, edm_sample
 from metrics import psnr as compute_psnr, ssim as compute_ssim, lpips_distance as compute_lpips
 
 
@@ -41,6 +42,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-steps", type=int, default=20, help="Denoising steps for sampling")
     p.add_argument("--csv-out", type=Path, default=None, help="Save results CSV (default: eval_results.csv next to checkpoint)")
     p.add_argument("--skip-slices", type=int, default=0, help="Skip first/last N slices per volume (often blank)")
+    p.add_argument("--sampler", choices=["legacy", "shared"], default="legacy",
+                   help="legacy: DIAMOND upsampling sampler from the `sampler` config (as in the first submission). "
+                        "shared: deterministic EDM sampler shared with the 3D model (src/models/diffusion/edm_sampler.py).")
+    p.add_argument("--order", type=int, choices=[1, 2], default=1, help="Solver order for --sampler shared (1: Euler, 2: Heun)")
+    p.add_argument("--sigma-min", type=float, default=2e-3, help="sigma_min for --sampler shared")
+    p.add_argument("--sigma-max", type=float, default=5.0, help="sigma_max for --sampler shared")
+    p.add_argument("--rho", type=int, default=7, help="rho for --sampler shared")
     return p.parse_args()
 
 
@@ -74,6 +82,8 @@ def main() -> None:
     sampler_cfg = instantiate(cfg.sampler)
     sampler_cfg.num_steps_denoising = args.num_steps
     sampler = DiffusionSampler(upsampler, sampler_cfg)
+    shared_cfg = EDMSamplerConfig(args.num_steps, args.sigma_min, args.sigma_max, args.rho, args.order)
+    print(f"Sampler: {args.sampler} ({shared_cfg if args.sampler == 'shared' else sampler_cfg})")
 
     lr_dir = args.data_dir / "low_res" / "test"
     hr_dir = args.data_dir / "full_res" / "test"
@@ -134,7 +144,15 @@ def main() -> None:
             prev = torch.cat((context_up, target_lr_up), dim=1)
 
             with torch.no_grad():
-                sr_frame, _ = sampler.sample(prev, None)
+                if args.sampler == "shared":
+                    b, t, c_, h_up, w_up = prev.shape
+                    cond = prev.reshape(b, t * c_, h_up, w_up)
+                    sr_frame = edm_sample(
+                        lambda x, sigma: upsampler.denoise(x, sigma, None, cond, None),
+                        torch.Size((b, c_, h_up, w_up)), shared_cfg, device,
+                    )
+                else:
+                    sr_frame, _ = sampler.sample(prev, None)
 
             bicubic = F.interpolate(target_lr, scale_factor=up_factor, mode=up_mode)
 
