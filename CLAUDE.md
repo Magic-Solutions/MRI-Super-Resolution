@@ -20,7 +20,7 @@ Sources:
 - Region: all 68 past Vertex custom jobs ran in `us-central1` on `g2-standard-8` with 1× L4. MRI jobs used the service accounts `diamond-vertex-trainer@omgrab-dev.iam.gserviceaccount.com` (2.5D/3D) and `omgrab-dev-jobs@omgrab-dev.iam.gserviceaccount.com` (Swin2SR), and read W&B from the secret `wandb-api-key`. Cloud Logging keeps only 30 days, so the March job logs are gone.
 - Data bucket: `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri/` (about 3.5 GiB). It has `full_res/train`, `low_res/{train,test}` and `samples/`, plus `low_res/train/episode_mapping.json` and `info.pt.bak_before_shape_cleanup`. It holds **processed data only**: no raw NIfTI and no code.
 - Vertex artifacts bucket: `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/` (55 folders on 2026-10-24: 11 from the MRI project, 44 unrelated). It contains:
-  - `run-3d-*` with `checkpoints_3d/model_epoch_{10..50}.pt`. The paper reports the 3D model after 20 epochs; only `run-3d-20260306-082303` (a 50-epoch run) has an epoch-20 checkpoint, but which file produced the paper's numbers is **NOT VERIFIED**.
+  - `run-3d-*` with `checkpoints_3d/model_epoch_{10..50}.pt`. The paper reports the 3D model after 20 epochs. The published `model_3d_epoch_20.pt` is `run-3d-20260306-082303/checkpoints_3d/model_epoch_20.pt` (see "Published weights" below).
   - `run-25d-10ep-*` with a copy of the processed data.
   - `run-swin2sr-2026030[7]-*` with `checkpoints_swin2sr/`. **An MRI-trained Swin2SR already exists**, but it was not reported in the paper and its training script is not in the repo.
   - Older `run-2026022x-*` runs and DIAMOND/game runs (`shorthands-*`) that have nothing to do with MRI.
@@ -42,10 +42,19 @@ Facts worth knowing:
 - **Both models train on the same sagittal 2D-mode data** (`processed_data_mri`). `train_3d.py` stacks the slices back into volumes. The preprocessor's `--mode 3d` writes a `volume_x` HDF5 key that `dataset_3d.py` cannot read; it was never used.
 - The 2.5D sampler config now lives under `sampler:` in `config/trainer_mri.yaml`. It used to be `world_model_env.diffusion_sampler_upsampling`. Defaults: 1 step, `order: 2` (Heun), σ_max 5, σ_min 1, `s_churn` 10. **This is not a Heun step.** With 1 step, `build_sigmas` gives σ = [5, 0], and `diffusion_sampler.py` skips the Heun correction when the next σ is 0. So the paper's "1-step Heun" (paper.tex lines 239, 283, 511, 515) is one Euler step with churn. `scripts/evaluate_25d.py` overrides the step count with `--num-steps`, which defaults to 20 (also at 371c36a), so which step count produced the paper's 2.5D numbers is **NOT VERIFIED**.
 - **3D patch size (likely 64³, NOT VERIFIED).** In `train_3d.py`, `--patch-size` is the LR patch (HR is `p × 2p × 2p`) and defaults to 64. `scripts/run_training_job_3d.sh` passes no `--patch-size`, and the March 3D job specs pass only `--epochs`. So the March 3D model most likely trained on 64³ LR patches (64×128×128 HR). `scripts/run_inference_3d.py` defaults to 32, and the paper (line 223) says 32³ LR. No surviving log confirms the training value.
-- **The epoch counts in the paper are unclear.** The paper says 2.5D trained for 10 epochs and 3D for 20.
-  - 2.5D: `run-25d-10ep-lr1e-4` and `-lr5e5` are each 10 more epochs warm-started from `run-20260306-035738` epoch 10 (job spec `INIT_CHECKPOINT_URI`), so 20 epochs in total. Which 2.5D run gave the paper's numbers is **NOT VERIFIED**.
-  - 3D: see the `run-3d-*` note above.
-  - The epochs are not comparable anyway: a March 3D epoch covered 258 sessions (from the code), a 2.5D epoch 100. Report optimizer steps or GPU-hours in the resubmission.
+- **Published weights: which March checkpoints the paper used (VERIFIED 2026-10-24).** The paper (line 49) links https://huggingface.co/Chichonnade/Comparative-Analysis-3D-2.5D-MRI-Super-Resolution-EDM (public; created 2026-03-06 20:52 UTC, last modified 2026-03-07 00:15 UTC). Each file's MD5 equals the GCS MD5 of exactly one of the 1,102 March `.pt` objects, and its sha256 matches the Hub's LFS id:
+
+  | Published file | March checkpoint | Model card says |
+  |---|---|---|
+  | `agent_epoch_00010.pt` (2.5D) | `run-20260306-035738` epoch 10 (batch 4 × 8, lr 1e-4) | 10 epochs, 33.68 dB / 0.967, "single-step Heun" |
+  | `model_3d_epoch_20.pt` | `run-3d-20260306-082303` epoch 20 (a 50-epoch run) | not described |
+  | `model_final.pt` | `run-3d-20260306-052515` final (the 10-epoch run) | "3D EDM Upsampler", 10 epochs, 37.77 dB / 0.996 |
+
+  - The paper's 2.5D model is therefore the 10-epoch run; the `run-25d-10ep-lr1e-4/-lr5e5` continuations were not published.
+  - The paper reports the 3D model after 20 epochs (37.75 dB), which fits `model_3d_epoch_20.pt`; the card instead describes the 10-epoch `model_final.pt` at 37.77 dB. Which file produced the paper's Table 1 is not settled by the hashes alone.
+  - For the same 2.5D checkpoint the card gives 33.68 dB and the paper 35.82 dB (Table 1). Possible causes, NOT VERIFIED: step count (the card's 1 step vs `evaluate_25d.py`'s default 20), test set, or aggregation.
+  - The card says both models trained on 59 subjects; the 3D code reads all 258 sessions (156 subjects), NOT VERIFIED by a log.
+- **Epochs are not comparable between the models.** A 2.5D "epoch" is a fixed `steps_per_epoch` = 400 optimizer steps (3,200 batches of 4 segments, 2 target slices each), not a pass over the data. A 3D or baseline epoch is a pass over the training volumes. Report optimizer steps or GPU-hours in the resubmission.
 - `common.seed` is now honoured. Before, it was ignored and a random seed was always drawn.
 - `state.pt` files from runs made before the cleanup cannot be resumed with `common.resume=True` (their trainer state has more fields). Warm-starting from their `agent_epoch_*.pt` through `initialization.path_to_ckpt` still works.
 - The 2.5D runs `run-20260306-035738`, `run-25d-10ep-lr1e-4` and `run-25d-10ep-lr5e5` have per-epoch logs in their W&B files (see "The 2.5D run folders" below; `main.log` is empty). These are usable for the convergence answer (R1.2a). The 3D runs only have checkpoints (epochs 10 to 50).
@@ -123,7 +132,7 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | 1 | Test set too small (5 subj); 59 train subjects not justified (R1.5, R2.1, R2.3, R3.1, R4, R5) | **MUST** | Larger FOMO60K train/val/test split at the subject level (see E1). Explain why the subset size was chosen. |
 | 2 | Unequal sampling: 3D uses 20-step Euler; 2.5D is described as "1-step Heun" (R1.2, R2-m2) | **MUST** | Run both models with the same 20-step sampler (E2). The step sweep is part of E3. The 2.5D "1-step Heun" is in fact one Euler step with churn (σ 5 → 0; see "Facts worth knowing"). Correct paper.tex lines 239, 283, 511 and 515, and say so in the R1.2 and R2-m2 answers. |
 | 3 | No ablations: steps, patch size, attention, P_mean/P_std, context slices (R1.2c, R1.6, R5) | **MUST** | Small ablation (E3). Also add the sampling sigma schedule (sigma_min, sigma_max, rho) and the 3D patch overlap at inference (R5: "sigma schedule sensitivity", "patch overlap effects"). |
-| 4 | Unequal epochs, convergence not shown (R1.2a, R2-m1) | **MUST** | Validation loss and PSNR/SSIM curves vs. training steps for **every** trained model (E4). The paper's own epoch counts are unclear (the 2.5D runs total 20 epochs, and a 3D epoch covered 2.6× more volumes), so the resubmission reports optimizer steps or GPU-hours, not epochs. |
+| 4 | Unequal epochs, convergence not shown (R1.2a, R2-m1) | **MUST** | Validation loss and PSNR/SSIM curves vs. training steps for **every** trained model (E4). Epochs are not comparable: a 2.5D epoch is a fixed 400 optimizer steps, while a 3D or baseline epoch is a pass over the data (and in March the 3D model saw 2.6× more volumes). So the resubmission reports optimizer steps or GPU-hours, not epochs. |
 | 5 | Synthetic block-averaging degradation; no k-space, noise or Gibbs (R1.3, R2.4, R5) | **MUST** | k-space truncation degradation (E5). State the clinical scope in the abstract and conclusion. R5 also lists Gibbs ringing, motion and scanner noise: k-space truncation already produces Gibbs; add Rician noise as a cheap extra variant; state motion as a limitation. |
 | 6 | No diffusion / MRI-specific SR comparator (R1.1, R3.6, R4) | **MUST** | Add at least one more diffusion model (E6) and discuss it at the algorithm level vs. Xia et al. and Wu et al. (R4). Note: the paper's "Xia et al. [12]" is actually Zhao et al., "MRI Super-Resolution With Partial Diffusion Models", IEEE TMI 2025, and its "Wu et al. [13]" is actually Safari et al., Res-SRDiff (arXiv 2503.01576). Use the correct names in the paper and in the response to R1 and R4. |
 | 7 | Baselines use DIV2K weights, not MRI fine-tuning (R1.1, R2.6, R3.7, R4, R5; raised by every reviewer) | **MUST** (added) | Retrain/fine-tune EDSR and Swin2SR on the same MRI training set and degradation (E7). Swin2SR runs already exist in the bucket. R4: domain-trained models beating off-the-shelf ones is already well established, so once the baselines are retrained the claim must rest on the architecture comparison. |
@@ -186,7 +195,10 @@ General rules for every experiment:
     | Res-SRDiff | 121/21 and 268/66 (no val) |
 
     Brain-MRI SR test sets are typically 70–111 subjects. Not yet confirmed with Hendrik, who suggested about 30 test and 100–200 train subjects on the call (`../ASK_HENDRIK.md`).
-  - **Cost per epoch vs. March:** 2.5D and Swin2SR see 500 volumes instead of 100, so **5×**. 3D sees 500 instead of 258, so about 1.9× (the 258 is from the code, NOT VERIFIED by a log). A March 2.5D epoch took about 42.5 min on one L4 (3,200 batches), so a new 2.5D epoch should take about 3.5 h if the cost scales linearly (estimate).
+  - **Cost per epoch vs. March:**
+    - 2.5D: unchanged. An epoch is 400 optimizer steps whatever the dataset size: about 43 min on one L4 (0.8 s per batch in the 2026-10-24 Vertex smoke run; March: 42.5 min). One pass over the 88,000 training slices is about 3.4 epochs (25,600 target slices per epoch; estimate). The paper's 10 epochs were about 14.5 passes over its 17,600 slices.
+    - Swin2SR and EDSR: 500 volumes instead of 100, so 5× per epoch.
+    - 3D: 500 instead of 258, so about 1.9× (the 258 is from the code, NOT VERIFIED by a log).
 - **E2 — Matched sampler.** Use the same EDM sampler (Euler or Heun; pick one and justify) with 20 steps for both 3D and 2.5D. Report the old 1-step 2.5D result for reference.
 - **E3 — Small hyperparameter ablation.** Use a reduced budget (subset of train data, fewer steps) and the val split.
   - Sampling steps {1, 5, 20} for both models.
@@ -225,7 +237,7 @@ General rules for every experiment:
 0. **Recovery & reproducibility.**
    - Recover the MRI preprocessing script, the Swin2SR training code and the subject lists from: the Vertex training images in Artifact Registry (`omgrab-dev`), Vertex custom-job specs and Cloud Logging, the run directories, the bucket metadata (`episode_mapping.json`, `info.pt*`) and any local copies.
    - Commit what we recover.
-   - Re-run the evaluation of the existing March 3D and 2.5D checkpoints, and check they reproduce the paper's numbers. This is also how to settle which checkpoints, step counts and patch size the paper used (all NOT VERIFIED, see "Facts worth knowing").
+   - The published checkpoints are identified ("Published weights"). Re-run their evaluation on the paper's 5 test subjects (regenerated from FOMO) to settle the step count, the 35.82 vs 33.68 dB gap, and which 3D file gives Table 1. Do not evaluate them on the new test set: 2 of its subjects were in the March training data.
 1. **Data.** E1 splits, plus the k-space test set (E5a) and IXI (E9).
 2. **Tooling.** Validation logging (E4), a single eval harness with statistics (E8), compute profiling, and the `degrade_kspace` function.
 3. **Main training.** 3D, 2.5D, EDSR, Swin2SR and the new diffusion model on the new split.
