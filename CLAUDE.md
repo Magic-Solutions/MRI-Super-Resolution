@@ -233,8 +233,10 @@ General rules for every experiment:
   - Log to W&B and CSV.
   - Train each model until val PSNR plateaus, with the same budget in GPU-hours or optimizer steps.
   - Plot curves for all models. Model selection uses the best val checkpoint.
-- **E5 — k-space degradation.**
-  - Implement `degrade_kspace(vol, factor, axes, noise_sigma)`: FFT, centre-crop or zero the outer k-space (truncation; produces Gibbs), add optional complex Gaussian noise, inverse FFT, take the magnitude.
+- **E5 — k-space degradation.** Implemented 2026-10-24: `src/data/degradation.py` (`degrade_kspace`) and `scripts/make_degraded_split.py`.
+  - The function keeps the central half of k-space in-plane (truncation, so Gibbs ringing), optionally adds complex Gaussian noise (Rician in the magnitude), and shifts the LR grid by half an HR pixel so it lines up with block averaging. Without that shift the LR image is offset and bicubic loses about 3.5 dB for reasons unrelated to the degradation.
+  - On one test volume: aligned k-space LR vs block-averaged LR 36.0 dB; bicubic from it 30.0 dB, against 29.7 dB from block averaging.
+  - Test sets built from the 70-subject `evaluation` split: `gs://hendrik_mri_super_resolution/mri_denoiser/processed_data_mri_resub_kspace/evaluation/` (no noise) and `…_kspace_noise2/evaluation/` (noise std 2 in 0–255 units). Each has a `degradation.json`.
   - (a) Evaluate the models trained with block averaging on a k-space-degraded test set (robustness).
   - (b) Retrain the main models with k-space degradation and evaluate them on both test sets.
   - Optional: through-plane variant.
