@@ -58,7 +58,23 @@ Facts worth knowing:
   - **The "Bicubic" baseline is bilinear.** The evaluation ran on MPS, where the scripts silently swap bicubic for bilinear. Bilinear gives the paper's 33.89 dB (Table 1) and its per-volume Table 2 values exactly. True bicubic: 35.65 dB, SSIM 0.973 (pooled, clamped).
   - **The 2.5D numbers used mismatched conditioning.** Training ran on CUDA with bicubic-upsampled conditioning (`Denoiser.forward`); the paper's evaluation ran on MPS with bilinear. Published checkpoint, legacy 1-step sampler, 993 slices: MPS/bilinear 35.82 dB / 0.9706, which reproduces Table 1 and Table 2 to within 0.01 dB per volume. CUDA/bicubic: 38.38 dB / 0.9837.
   - **Table 2 omits sub_9320.** Table 1 is the mean over all 993 slices; Table 2's averages are means of 5 per-volume means without sub_9320. That fully explains 35.82 vs 35.67 (R1.4).
-  - The 3D files and the 20-step 2.5D are being re-evaluated (run `mri-resub-eval-paper-20261024-2140`). The model card's 33.68 dB for the 2.5D checkpoint is not reproduced by either 1-step setting.
+  - **The paper's 3D model is `model_3d_epoch_20.pt`.** Re-evaluated on CUDA (20 steps, patch 32, 2-D SSIM), its per-volume PSNRs 37.44, 38.16, 37.34, 37.74, 38.11 match Table 2 (37.44, 38.15, 37.33, 37.74, 38.10). `model_final.pt` (the 10-epoch run) gives different values; its 6-volume mean, 37.77, is the model card's 3D figure.
+  - **Table 1 averaged the two models differently.** Its 3D 37.75 is the mean of Table 2's 5 volume means; the 2.5D 35.82 is pooled over all 6 volumes.
+  - **Matched comparison on the paper's test set** (CUDA, pooled over 993 slices, 2-D SSIM; run `mri-resub-eval-paper-20261024-2140`):
+
+    | Method | PSNR | SSIM | LPIPS |
+    |---|---|---|---|
+    | Bilinear (the paper's "Bicubic") | 33.89 | 0.957 | 0.091 |
+    | Bicubic (true) | 35.59 | 0.973 | 0.070 |
+    | EDSR, DIV2K weights | 35.57 | 0.977 | 0.024 |
+    | Swin2SR, DIV2K weights | 35.50 | 0.978 | 0.024 |
+    | 2.5D (published), legacy sampler, 1 step | 38.38 | 0.984 | 0.022 |
+    | 2.5D (published), legacy sampler, 20 steps | 33.32 | 0.914 | 0.134 |
+    | 3D `model_3d_epoch_20.pt`, 20 steps, patch 32 | 37.84 | 0.985 | 0.020 |
+
+    EDSR and Swin2SR reproduce the paper exactly; they take the LR image directly, so the device did not matter for them. Evaluated consistently, the published 2.5D model leads the published 3D model by 0.54 dB PSNR, and 3D leads slightly in SSIM and LPIPS. The two were also trained on different data (100 vs 258 sessions). The paper's "3D wins on all metrics by 1.93 dB" does not hold.
+  - **Sampler:** the legacy stochastic sampler (churn, σ_min 1) degrades with more steps. The shared deterministic sampler does not: published 2.5D on sub_2642, 1 / 5 / 20 steps = 38.01 / 38.30 / 38.31 dB. So E2's shared 20-step sampler is fair to the 2.5D model.
+  - The model card's 2.5D figure (33.68 dB / 0.967) matches neither setting; it is closest to the legacy 20-step result (33.32 / 0.914). Its origin is NOT VERIFIED and does not matter for the resubmission.
 - **Epochs are not comparable between the models.** A 2.5D "epoch" is a fixed `steps_per_epoch` = 400 optimizer steps (3,200 batches of 4 segments, 2 target slices each), not a pass over the data. A 3D or baseline epoch is a pass over the training volumes. Report optimizer steps or GPU-hours in the resubmission.
 - `common.seed` is now honoured. Before, it was ignored and a random seed was always drawn.
 - `state.pt` files from runs made before the cleanup cannot be resumed with `common.resume=True` (their trainer state has more fields). Warm-starting from their `agent_epoch_*.pt` through `initialization.path_to_ckpt` still works.
@@ -150,7 +166,7 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | 14 | Other MRI-specific non-diffusion SR (mDCSRN, SynthSR) (R1.1) | **SHOULD** | mDCSRN trained on our split if time allows. SynthSR solves a different task: discuss it, don't benchmark it. |
 | 15 | Through-plane SR is more clinically relevant (R1-m7) | Stretch / TEXT | Could reuse the E5 pipeline along the slice axis. Otherwise state it as a limitation. |
 | 16 | T1-only (R1-m8) | Stretch / TEXT | FOMO60K includes other contrasts. Zero-shot T2/FLAIR evaluation only if cheap. |
-| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | **The premise may not hold:** evaluated with the conditioning it was trained with, the published 2.5D checkpoint scores 38.38 dB, above the paper's 37.75 dB for 3D (see "How the first submission's numbers were produced"). Re-check with the new runs before writing this answer. Use ablation results (context slices, steps) to support the argument. Note: in March the 3D model trained on 258 sessions (`episode_mapping.json`) while 2.5D trained on 100 (`info.pt`), from reading the code. The old gap is therefore confounded by data size; the new split gives both models the same data. |
+| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | **The premise does not hold as published:** evaluated consistently, the published 2.5D checkpoint scores 38.38 dB against 37.84 dB for the published 3D model, while 3D leads slightly in SSIM and LPIPS (see "How the first submission's numbers were produced"). Answer from the new runs, which give both models the same data. Use ablation results (context slices, steps) to support the argument. Note: in March the 3D model trained on 258 sessions (`episode_mapping.json`) while 2.5D trained on 100 (`info.pt`), from reading the code. The old gap is therefore confounded by data size; the new split gives both models the same data. |
 | 18 | Limited novelty; DIAMOND origin (R3.4, R5, R1-m6, R1-m9) | TEXT | Frame the contribution as a controlled comparison. Document every change made relative to DIAMOND (channels, attention, sigma). Name the DIAMOND origin in the abstract/introduction. |
 | 19 | Incomplete setup description (R3.8) and validation/model selection (R2-m1) | TEXT | Full degradation, training and config details in the paper and supplement. State the 3D patch size actually used: the paper says 32³ LR, but the March training most likely used 64³ (NOT VERIFIED). The new runs set `--patch-size` explicitly. |
 | 20 | Fig. 1 and Fig. 4 captions, references, abstract phrasing (R1-m1, m2, m3, m10; R5-minor: captions should give a more anatomically precise interpretation) | TEXT | Fix directly. References: wrong author lists in [11], [12] and [13], plus issues in [19] and [23] (see `../context/reference_errors.md`). Six bibitems are never cited: b4, b5, b8, b14, b15, b16. |
@@ -242,7 +258,7 @@ General rules for every experiment:
 0. **Recovery & reproducibility.**
    - Recover the MRI preprocessing script, the Swin2SR training code and the subject lists from: the Vertex training images in Artifact Registry (`omgrab-dev`), Vertex custom-job specs and Cloud Logging, the run directories, the bucket metadata (`episode_mapping.json`, `info.pt*`) and any local copies.
    - Commit what we recover.
-   - The published checkpoints are identified ("Published weights"). Re-run their evaluation on the paper's 5 test subjects (regenerated from FOMO) to settle the step count, the 35.82 vs 33.68 dB gap, and which 3D file gives Table 1. Do not evaluate them on the new test set: 2 of its subjects were in the March training data.
+   - Done 2026-10-24: the published checkpoints were re-evaluated on the rebuilt paper test set, and every number in the paper's Tables 1 and 2 is accounted for ("How the first submission's numbers were produced"). Do not evaluate the March checkpoints on the new test set: 2 of its subjects were in the March training data.
 1. **Data.** E1 splits, plus the k-space test set (E5a) and IXI (E9).
 2. **Tooling.** Validation logging (E4), a single eval harness with statistics (E8), compute profiling, and the `degrade_kspace` function.
 3. **Main training.** 3D, 2.5D, EDSR, Swin2SR and the new diffusion model on the new split.
