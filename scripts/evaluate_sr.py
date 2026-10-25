@@ -14,7 +14,7 @@ Every method is scored the same way, so the CSVs can be compared with
   no bicubic, and the first submission's "bicubic" baseline was bilinear for
   that reason.
 
-Methods: bilinear, bicubic, 25d, 3d, edsr, swin2sr.
+Methods: bilinear, bicubic, 25d, 3d, edsr, swin2sr, ressrdiff (needs --code-dir, a Res-SRDiff clone).
 
 Usage:
     python scripts/evaluate_sr.py --method bicubic --data-dir <split> --out bicubic.csv
@@ -49,7 +49,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from data.dataset import Dataset, MRIHdf5Dataset  # noqa: E402
 from metrics import lpips_distance, psnr, ssim  # noqa: E402
 
-METHODS = ["bilinear", "bicubic", "25d", "3d", "edsr", "swin2sr"]
+METHODS = ["bilinear", "bicubic", "25d", "3d", "edsr", "swin2sr", "ressrdiff"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cond-channels", type=int, default=1024)
     # EDSR / Swin2SR
     p.add_argument("--pretrained", action="store_true", help="Use the DIV2K weights instead of --checkpoint")
+    # Res-SRDiff
+    p.add_argument("--code-dir", type=Path, default=None, help="Clone of github.com/mosaf/Res-SRDiff (src/ressrdiff_adapter.py)")
     return p.parse_args()
 
 
@@ -208,6 +210,21 @@ class Model2dBaseline:
         return torch.cat(out)
 
 
+class ModelResSRDiff:
+    def __init__(self, args: argparse.Namespace, device: torch.device) -> None:
+        import ressrdiff_adapter
+
+        self.adapter = ressrdiff_adapter
+        self.rmodel = ressrdiff_adapter.build_model(args.code_dir, ressrdiff_adapter.make_flags(), device)
+        self.rmodel.ema_model.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=False), strict=True)
+        self.model = self.rmodel.ema_model
+
+    @torch.no_grad()
+    def predict_volume(self, lr: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.adapter.sample(self.rmodel, self.adapter.lq_from_lr(lr[si : si + 1])).cpu()
+                          for si in range(lr.size(0))])
+
+
 def psnr_foreground(pred: torch.Tensor, target: torch.Tensor) -> float:
     mask = target > -1  # HR pixels that were non-zero before normalization to [-1, 1]
     mse = (pred - target)[mask].pow(2).mean().item()
@@ -224,8 +241,10 @@ def git_sha() -> str:
 
 def main() -> None:
     args = parse_args()
-    if args.method in ("25d", "3d") or (args.method in ("edsr", "swin2sr") and not args.pretrained):
+    if args.method in ("25d", "3d", "ressrdiff") or (args.method in ("edsr", "swin2sr") and not args.pretrained):
         assert args.checkpoint is not None, f"--checkpoint is required for --method {args.method}"
+    if args.method == "ressrdiff":
+        assert args.code_dir is not None, "--code-dir is required for --method ressrdiff"
     torch.manual_seed(args.seed)
     device = pick_device()
     name = args.name or args.method
@@ -237,6 +256,8 @@ def main() -> None:
         method = Model25d(args, device)
     elif args.method == "3d":
         method = Model3d(args, device)
+    elif args.method == "ressrdiff":
+        method = ModelResSRDiff(args, device)
     else:
         method = Model2dBaseline(args, device)
 
