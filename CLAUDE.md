@@ -72,7 +72,18 @@ Facts worth knowing:
     | 2.5D (published), legacy sampler, 20 steps | 33.32 | 0.914 | 0.134 |
     | 3D `model_3d_epoch_20.pt`, 20 steps, patch 32 | 37.84 | 0.985 | 0.020 |
 
-    EDSR and Swin2SR reproduce the paper exactly; they take the LR image directly, so the device did not matter for them. Evaluated consistently, the published 2.5D model leads the published 3D model by 0.54 dB PSNR, and 3D leads slightly in SSIM and LPIPS. The two were also trained on different data (100 vs 258 sessions). The paper's "3D wins on all metrics by 1.93 dB" does not hold.
+    EDSR and Swin2SR reproduce the paper exactly; they take the LR image directly, so the device did not matter for them.
+  - **3D inference patch size matters.** `evaluate_sr.py`, run `mri-resub-eval-paper-3dpatch-20261025-0015`: the 3D model evaluated with the 64³ patches it most likely trained on gains 0.5 dB over the paper's 32³. With every model evaluated as trained (pooled over 993 slices; foreground PSNR counts only non-zero HR pixels):
+
+    | Method | PSNR | PSNR foreground | SSIM | LPIPS |
+    |---|---|---|---|---|
+    | 2.5D, shared sampler, 20 steps | 38.69 | 32.75 | 0.9846 | 0.0183 |
+    | 2.5D, legacy, 1 step | 38.38 | 32.70 | 0.9838 | 0.0219 |
+    | 3D, patch 64 | 38.34 | 33.17 | 0.9851 | 0.0174 |
+    | 3D, patch 32 (as in the paper) | 37.83 | 33.30 | 0.9848 | 0.0204 |
+    | Bicubic | 35.65 | 29.90 | 0.9732 | 0.0704 |
+
+    Whole-slice PSNR favours 2.5D, foreground PSNR, SSIM and LPIPS slightly favour 3D, and nothing is significant with 6 volumes (Holm-corrected Wilcoxon). The paper's "3D best on all metrics by 1.93 dB" does not hold, but neither does "2.5D beats 3D". The two models were also trained on different data (100 vs 258 sessions). Answer from the new runs, and report foreground PSNR alongside whole-slice PSNR.
   - **Sampler:** the legacy stochastic sampler (churn, σ_min 1) degrades with more steps. The shared deterministic sampler does not: published 2.5D on sub_2642, 1 / 5 / 20 steps = 38.01 / 38.30 / 38.31 dB. So E2's shared 20-step sampler is fair to the 2.5D model.
   - The model card's 2.5D figure (33.68 dB / 0.967) matches neither setting; it is closest to the legacy 20-step result (33.32 / 0.914). Its origin is NOT VERIFIED and does not matter for the resubmission.
 - **Epochs are not comparable between the models.** A 2.5D "epoch" is a fixed `steps_per_epoch` = 400 optimizer steps (3,200 batches of 4 segments, 2 target slices each), not a pass over the data. A 3D or baseline epoch is a pass over the training volumes. Report optimizer steps or GPU-hours in the resubmission.
@@ -166,7 +177,7 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | 14 | Other MRI-specific non-diffusion SR (mDCSRN, SynthSR) (R1.1) | **SHOULD** | mDCSRN trained on our split if time allows. SynthSR solves a different task: discuss it, don't benchmark it. |
 | 15 | Through-plane SR is more clinically relevant (R1-m7) | Stretch / TEXT | Could reuse the E5 pipeline along the slice axis. Otherwise state it as a limitation. |
 | 16 | T1-only (R1-m8) | Stretch / TEXT | FOMO60K includes other contrasts. Zero-shot T2/FLAIR evaluation only if cheap. |
-| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | **The premise does not hold as published:** evaluated consistently, the published 2.5D checkpoint scores 38.38 dB against 37.84 dB for the published 3D model, while 3D leads slightly in SSIM and LPIPS (see "How the first submission's numbers were produced"). Answer from the new runs, which give both models the same data. Use ablation results (context slices, steps) to support the argument. Note: in March the 3D model trained on 258 sessions (`episode_mapping.json`) while 2.5D trained on 100 (`info.pt`), from reading the code. The old gap is therefore confounded by data size; the new split gives both models the same data. |
+| 17 | Explain why 3D beats 2.5D (R3.5) | TEXT | **The premise does not hold as published:** evaluated as trained, the published 2.5D and 3D models are within about 0.5 dB, with whole-slice PSNR favouring 2.5D and foreground PSNR, SSIM and LPIPS slightly favouring 3D (see "How the first submission's numbers were produced"). Answer from the new runs, which give both models the same data. Use ablation results (context slices, steps) to support the argument. Note: in March the 3D model trained on 258 sessions (`episode_mapping.json`) while 2.5D trained on 100 (`info.pt`), from reading the code. The old gap is therefore confounded by data size; the new split gives both models the same data. |
 | 18 | Limited novelty; DIAMOND origin (R3.4, R5, R1-m6, R1-m9) | TEXT | Frame the contribution as a controlled comparison. Document every change made relative to DIAMOND (channels, attention, sigma). Name the DIAMOND origin in the abstract/introduction. |
 | 19 | Incomplete setup description (R3.8) and validation/model selection (R2-m1) | TEXT | Full degradation, training and config details in the paper and supplement. State the 3D patch size actually used: the paper says 32³ LR, but the March training most likely used 64³ (NOT VERIFIED). The new runs set `--patch-size` explicitly. |
 | 20 | Fig. 1 and Fig. 4 captions, references, abstract phrasing (R1-m1, m2, m3, m10; R5-minor: captions should give a more anatomically precise interpretation) | TEXT | Fix directly. References: wrong author lists in [11], [12] and [13], plus issues in [19] and [23] (see `../context/reference_errors.md`). Six bibitems are never cited: b4, b5, b8, b14, b15, b16. |
