@@ -23,9 +23,17 @@ mkdir -p "${WORK_ROOT}" "${SAVE_DIR}"
 pip install --no-cache-dir piq==0.8.0 einops==0.7.0 timm==1.0.14
 python -c "import torch, timm, piq, einops; print('torch', torch.__version__, 'timm', timm.__version__)"
 
-git clone -q https://github.com/mosaf/Res-SRDiff.git "${CODE_DIR}"
-git -C "${CODE_DIR}" checkout -q "${RESSRDIFF_COMMIT}"
-echo "Res-SRDiff at $(git -C "${CODE_DIR}" rev-parse HEAD)"
+# The base image has no git; fetch the pinned commit as a GitHub archive instead.
+python - "${RESSRDIFF_COMMIT}" "${CODE_DIR}" <<'PY'
+import io, shutil, sys, tarfile, urllib.request
+commit, dst = sys.argv[1], sys.argv[2]
+data = urllib.request.urlopen(f"https://github.com/mosaf/Res-SRDiff/archive/{commit}.tar.gz", timeout=120).read()
+with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+    root = tar.getnames()[0].split("/")[0]
+    tar.extractall("/tmp/ressrdiff_src")
+shutil.move(f"/tmp/ressrdiff_src/{root}", dst)
+print(f"Res-SRDiff {commit} extracted to {dst}")
+PY
 
 export PREPROCESSED_DATA_URI PROCESSED_DIR
 python - <<'PY'
