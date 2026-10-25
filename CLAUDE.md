@@ -258,6 +258,7 @@ General rules for every experiment:
     - Xia et al.'s partial diffusion model (explicitly named by R1, already cited).
   - Prefer an MRI-specific one (Xia et al.) if its code exists. Otherwise use SR3 or ResShift.
   - Train it on the same split and degradation, and include it in E4 and E8.
+  - **Chosen: Res-SRDiff** (Safari et al., the paper's "Wu et al."); Xia et al.'s code is not public. Branch `resub/ressrdiff`: `src/ressrdiff_adapter.py`, `src/train_ressrdiff.py`, `scripts/run_training_job_ressrdiff.sh` (downloads the pinned commit at run time), `evaluate_sr.py --method ressrdiff`. Full run `mri-resub-ressrdiff-main-20261025-0435`: one A100, 12 h cap (~100k steps at batch 16), EMA weights validated every 5,500 steps (one pass) on 16 slices per val volume. It runs on an A100 while the others ran on L4s, so compare budgets in optimizer steps and samples seen, not hours.
 - **E7 — Fair baselines.** EDSR and Swin2SR trained/fine-tuned on the same data and degradation. Bicubic stays as a reference. Both train from scratch with `src/train_swin2sr.py --arch {swin2sr,edsr}` ("Still open" item 3).
 - **E8 — Statistics.** Implemented: `scripts/evaluate_sr.py` (per-slice CSV per method) and `scripts/compare_sr.py` (tables and tests).
   - Per-subject metrics, mean ± SD, bootstrap 95% CI over subjects.
