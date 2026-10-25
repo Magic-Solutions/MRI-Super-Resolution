@@ -11,7 +11,7 @@ The work has two parts:
 2. **Run** the selected experiments, then update the manuscript and write the response-to-reviewers document. That document needs, for each comment: the concern, our response, and the action taken.
 
 Sources:
-- Reviewer comments: `publication/reviewer-comments.html` (5 reviewers; R5 also attached `Access-2026-10274_Proof_hi_flaws.pdf`, which is not in the repo yet and needs to be obtained).
+- Reviewer comments: `publication/reviewer-comments.html` (5 reviewers). R5 writes "Technical Appendix attached Access-2026-10274_Proof_hi_flaws.pdf", but no such file was attached: Eshaan checked the IEEE portal on 2026-10-25. The review text is all we have.
 - Manuscript: `paper.tex` (`\documentclass{ieeeaccess}`), the file to resubmit. It lives in Overleaf (project 699cae01a03f708c8f9aaf8d); a LaTeX export is at `../context/manuscript/extracted/manuscript_ieee_access/paper.tex` on Eshaan's Mac. The repo has only the arXiv version, `publication/manuscript_ieee_access/preprint_arxiv.tex`.
 
 ## Infrastructure
@@ -187,7 +187,7 @@ Legend: **MUST** = required experiment · **SHOULD** = high value, run if budget
 | 24 | Radiologist reader study (R2.7, R5) | REBUT | Out of scope; offer the segmentation-based downstream metric (row 11) instead. |
 | 25 | "Ecosystem-level consequences of warming" (R2.7) | REBUT | Clearly pasted in by mistake from another review. Point this out politely. |
 | 26 | Pathological cases (R1 Q3) | TEXT | State as a limitation. |
-| 27 | R5's technical appendix `Access-2026-10274_Proof_hi_flaws.pdf` (R5) | **MUST** obtain | Its contents are unknown, so the triage is not complete until we have it. Owner: Hendrik (IEEE Author Portal). |
+| 27 | R5's technical appendix `Access-2026-10274_Proof_hi_flaws.pdf` (R5) | **REBUT** | Never attached (portal checked 2026-10-25), so the triage covers R5's review text only. In the response to R5, say politely that the appendix was not included with the decision and that every point in the review text is answered. |
 | 28 | Submission package (decision letter) | **MUST** | Get the response template and the Resubmission Checklist (both attached to the letter, not in the repo). **The "Request for Byline Change" form is required**: Eshaan is joining the author list (decided 2026-10-24). It needs a detailed justification of each author's contribution, is uploaded as "Request for byline change form", and the justification is entered again during submission. The letter calls author changes "rare and exceptional" and leaves the decision to the Editor. Agree the author order and get every author's OK, including Ludovic Corcos and Logan Rouge. Owner: Hendrik (IEEE Author Portal); open questions are in `../ASK_HENDRIK.md`. |
 
 ## Experiments
