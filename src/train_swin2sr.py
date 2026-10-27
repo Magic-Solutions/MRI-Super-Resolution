@@ -193,7 +193,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hr-train", type=Path, required=True, help="HR train directory (.hdf5)")
     parser.add_argument("--lr-test", type=Path, default=None, help="LR validation directory (never the held-out test set)")
     parser.add_argument("--hr-test", type=Path, default=None, help="HR validation directory")
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=20, help="Number of the last epoch")
+    parser.add_argument("--start-epoch", type=int, default=1, help="Number of the first epoch; a continued run counts on from the original")
+    parser.add_argument("--init-checkpoint", type=Path, default=None, help="Start from these weights (optimizer state starts fresh)")
+    parser.add_argument("--patience", type=int, default=0, help="Stop after this many validations without a new best PSNR (0: off)")
     parser.add_argument("--batch-size", type=int, default=4, help="Swin2SR runs out of memory at 16 on one L4")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--grad-acc-steps", type=int, default=4)
@@ -211,6 +214,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--log-every", type=int, default=50,
                         help="Print step-level loss every N steps")
     return parser.parse_args()
+
+
+def append_csv_row(path: Path, row: dict) -> None:
+    write_header = not path.is_file()
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def main() -> None:
@@ -234,6 +246,9 @@ def main() -> None:
 
     print(f"Building {args.arch} from scratch (random init) ...", flush=True)
     model = BUILDERS[args.arch](device)
+    if args.init_checkpoint is not None:
+        model.load_state_dict(torch.load(args.init_checkpoint, map_location=device, weights_only=False), strict=True)
+        print(f"Initialised from {args.init_checkpoint}", flush=True)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}", flush=True)
 
@@ -254,9 +269,19 @@ def main() -> None:
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
     best_val_psnr = float("-inf")
+    since_best = 0
     path_csv = args.save_dir / "val_metrics.csv"
 
-    for epoch in range(1, args.epochs + 1):
+    if args.init_checkpoint is not None and val_dataset is not None:
+        # Score the starting weights, so a continued run keeps them unless training beats them.
+        eval_metrics = evaluate(model, val_dataset, device, args.eval_slices_per_volume, args.eval_lpips)
+        best_val_psnr = eval_metrics["eval/psnr"]
+        torch.save(model.state_dict(), args.save_dir / f"{args.arch}_best_val.pt")
+        print(f"Starting weights: val PSNR={best_val_psnr:.2f}  SSIM={eval_metrics['eval/ssim']:.4f}", flush=True)
+        append_csv_row(path_csv, {"epoch": args.start_epoch - 1, "train_loss": "", "val_psnr": best_val_psnr,
+                                  "val_ssim": eval_metrics["eval/ssim"], "is_best": 1})
+
+    for epoch in range(args.start_epoch, args.epochs + 1):
         model.train()
         optimizer.zero_grad()
         epoch_loss = 0.0
@@ -315,15 +340,13 @@ def main() -> None:
                 best_path = args.save_dir / f"{args.arch}_best_val.pt"
                 torch.save(model.state_dict(), best_path)
                 print(f"  New best val PSNR; saved {best_path}", flush=True)
+                since_best = 0
+            else:
+                since_best += 1
 
             row = {"epoch": epoch, "train_loss": avg_loss, "val_psnr": eval_metrics["eval/psnr"],
                    "val_ssim": eval_metrics["eval/ssim"], "is_best": int(is_best)}
-            write_header = not path_csv.is_file()
-            with path_csv.open("a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row))
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(row)
+            append_csv_row(path_csv, row)
 
         if args.wandb_project and wandb is not None:
             wandb.log(log_dict)
@@ -332,6 +355,10 @@ def main() -> None:
             ckpt_path = args.save_dir / f"{args.arch}_epoch_{epoch}.pt"
             torch.save(model.state_dict(), ckpt_path)
             print(f"  Saved {ckpt_path}", flush=True)
+
+        if args.patience and since_best >= args.patience:
+            print(f"No new best val PSNR in {since_best} validations; stopping after epoch {epoch}", flush=True)
+            break
 
     final_path = args.save_dir / f"{args.arch}_final.pt"
     torch.save(model.state_dict(), final_path)

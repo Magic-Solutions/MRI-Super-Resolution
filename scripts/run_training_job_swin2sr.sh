@@ -6,6 +6,7 @@ set -euo pipefail
 # - PREPROCESSED_DATA_URI: gs://... prefix containing already-processed dataset (low_res/full_res)
 # Optional:
 # - RUN_NAME, TRAIN_SWIN2SR_ARGS (extra CLI args for train_swin2sr.py)
+# - INIT_CHECKPOINT_URI (gs:// weights to start from)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -122,6 +123,25 @@ sync_checkpoints_if_changed() {
   fi
 }
 
+# Optional start weights, to continue a finished run (with --start-epoch in the extra args).
+INIT_ARGS=()
+if [[ -n "${INIT_CHECKPOINT_URI:-}" ]]; then
+  INIT_CKPT_LOCAL="${WORK_ROOT}/init_checkpoint.pt"
+  echo "Downloading init checkpoint ${INIT_CHECKPOINT_URI} -> ${INIT_CKPT_LOCAL}"
+  python - "${INIT_CHECKPOINT_URI}" "${INIT_CKPT_LOCAL}" <<'PY'
+import sys, os
+from google.cloud import storage
+
+src, dst = sys.argv[1], sys.argv[2]
+bucket = src[len("gs://"):].split("/", 1)[0]
+blob = src[len("gs://") + len(bucket) + 1:]
+client = storage.Client(project=os.environ.get("GCP_PROJECT") or None)
+client.bucket(bucket).blob(blob).download_to_filename(dst)
+print(f"Downloaded checkpoint to {dst}")
+PY
+  INIT_ARGS=(--init-checkpoint "${INIT_CKPT_LOCAL}")
+fi
+
 python -u src/train_swin2sr.py \
   --lr-train "${PROCESSED_DIR}/low_res/train" \
   --hr-train "${PROCESSED_DIR}/full_res/train" \
@@ -130,6 +150,7 @@ python -u src/train_swin2sr.py \
   --save-dir "${SAVE_DIR}" \
   --wandb-project mri-super-resolution-swin2sr \
   --wandb-name "${RUN_NAME}" \
+  "${INIT_ARGS[@]}" \
   ${TRAIN_SWIN2SR_ARGS} &
 TRAIN_PID=$!
 

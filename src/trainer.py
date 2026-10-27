@@ -175,7 +175,7 @@ class Trainer(StateDictMixin):
         self.agent.setup_training(instantiate(cfg.upsampler.sigma_distribution))
 
         # Training state (things to be saved/restored)
-        self.epoch = 0
+        self.epoch = getattr(cfg.training, "first_epoch", 1) - 1  # > 0 when continuing a finished run
         self.num_batch_train = 0
         self.num_batch_test = 0
         self.best_val_psnr = float("-inf")
@@ -193,6 +193,12 @@ class Trainer(StateDictMixin):
 
     def run(self) -> None:
         num_epochs = self._cfg.training.num_final_epochs
+        patience = getattr(self._cfg.training, "early_stop_patience", 0)
+
+        if (self._rank == 0 and self._cfg.initialization.path_to_ckpt is not None and not self._cfg.common.resume
+                and getattr(self._cfg.evaluation, "val_sr_every", 0)):
+            # Score the starting weights, so a continued run keeps them unless training beats them.
+            self.update_best_val([], self.validate_upsampler_sr()[0])
 
         while self.epoch < num_epochs:
             self.epoch += 1
@@ -228,6 +234,10 @@ class Trainer(StateDictMixin):
 
             if dist.is_initialized():
                 dist.barrier()
+
+            if patience and self.best_val_epoch and self.epoch - self.best_val_epoch >= patience:
+                print(f"No new best val PSNR in {patience} epochs; stopping after epoch {self.epoch}")
+                break
 
         if self._rank == 0:
             wandb.finish()

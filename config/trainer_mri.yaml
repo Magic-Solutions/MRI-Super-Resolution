@@ -31,7 +31,9 @@ checkpointing:
 
 training:
   should: True
-  num_final_epochs: 600
+  num_final_epochs: 600  # number of the last epoch
+  first_epoch: 1  # > 1 to continue a finished run from initialization.path_to_ckpt
+  early_stop_patience: 0  # stop after this many epochs without a new best val PSNR (0: off)
   cache_in_ram: False
   num_workers_data_loaders: 4
   debug_step_logs: False
