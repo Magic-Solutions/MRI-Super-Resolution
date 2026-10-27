@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from hydra import compose, initialize_config_dir
 from hydra.utils import instantiate
 
@@ -48,6 +49,12 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+    if device.type == "mps":
+        # Denoiser.forward upsamples the conditioning bilinearly on MPS; training used bicubic on CUDA.
+        # Keep bicubic here (it falls back to the CPU with PYTORCH_ENABLE_MPS_FALLBACK=1), or the
+        # numbers are about 3 dB worse than the run's and not comparable with its training loss.
+        _interpolate = F.interpolate
+        F.interpolate = lambda *a, **k: _interpolate(*a, **{**k, "mode": "bicubic"}) if k.get("mode") == "bilinear" else _interpolate(*a, **k)
     with initialize_config_dir(config_dir=str(ROOT / "config"), version_base="1.3"):
         cfg = compose(config_name=args.config_name, overrides=args.override)
     inner = cfg.agent.upsampler.inner_model
