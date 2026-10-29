@@ -240,6 +240,7 @@ General rules for every experiment:
   - EDM sigma distribution (P_mean, P_std): {(-1.2, 1.2), (-0.6, 1.0), (0.0, 1.0)}.
   - Attention: deepest level only vs. the two deepest levels (only if budget allows).
   - One factor at a time around the default. Table plus one figure.
+- **E3 — Ablations, what is running (2026-10-29).** Eshaan approved the inference-time items A1 (sampling steps 1/2/5/10/20) and A2 (Euler vs Heun at 20 steps) for 2.5D, 2.5D-both and 3D, plus B1 (per-sigma denoising error, `scripts/per_sigma_error.py`), all on the 6 validation volumes with the equal-budget checkpoints; A3/A4/A5/A7 skipped, B2–B5 (training-side sigma, attention, 32³ patch) undecided. Job `mri-resub-ablation-20261024-2204` (4181504920148508672, A100, image e4ea502), script `../context/eval_resub/ablation_job.sh`, output `gs://omgrab-dev-diamond-vertex-artifacts/diamond/runs/mri-resub-ablation-20261024-2204/{per_sigma,steps}/`. Approval doc: https://claude.ai/artifact/1eZV9dpU9qFxpgkeTiMF2e.
 - **E4 — Convergence.**
   - Add periodic validation (loss, PSNR, SSIM on a fixed val subset) to the 2.5D trainer (`src/trainer.py`), the 3D trainer (`src/train_3d.py`) and every baseline trainer.
   - Log to W&B and CSV.
