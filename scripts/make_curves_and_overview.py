@@ -49,9 +49,11 @@ def load_runs() -> dict[str, tuple[pd.DataFrame, pd.DataFrame | None, int | None
     tc = RES / "training_curves"
     runs = {}
     runs["25d_prev"] = (pd.read_csv(tc / "25d.csv"), pd.read_csv(RES / "cont_25d" / "val_metrics.csv"), 30)
-    both = pd.read_csv(tc / "25d_both.csv")
+    # The both-neighbours run logged its validation under the edge-padding bug; the re-validated
+    # curve (recompute_val_psnr.py, job mri-resub-recompute-val-psnr-20261024-2204) replaces it.
+    both = pd.read_csv(tc / "25d_both_val_psnr_fixed.csv")
     both_cont = pd.read_csv(RES / "cont_25d_both" / "val_metrics.csv")
-    runs["25d"] = (both, both_cont, 31)
+    runs["25d"] = (both, both_cont, 27)
     runs["3d"] = (pd.read_csv(tc / "3d.csv"), pd.read_csv(RES / "cont_3d" / "val_metrics.csv"), 47)
     runs["edsr"] = (pd.read_csv(tc / "edsr.csv"), None, 16)
     sw_cont = tc / "swin2sr_cont_wandb.csv"
