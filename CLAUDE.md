@@ -276,6 +276,12 @@ General rules for every experiment:
 - **E9 — External validation.** IXI T1 with the same preprocessing and zero-shot inference.
 - **E10 — Fidelity / downstream.** SynthSeg on GT vs. SR volumes, Dice per structure; failure cases; difference maps.
 
+## Manuscript
+
+- Source of record is Hendrik's Overleaf project; `publication/manuscript_ieee_access/paper.tex` is gitignored on purpose (only `preprint_arxiv.tex` is tracked). Edit paper.tex locally, keep a copy and a diff under `../context/manuscript/resub/`, and paste into Overleaf.
+- **Pass 1 done 2026-10-29** (corrective, no pending decision): matched protocol, equal-budget Tables 1–2 and the step sweep, k-space definition, corrected references. `RESUB-TODO` comments mark pass-2 slots: byline, the 3D/Swin2SR convergence rows, the ablation section, regenerated figures (all old results figures are commented out), and the framing sentences.
+- Numbers in the paper come from `results/final_eval_20261024-2204/{blockavg,kspace,kspace_noise2}/summary_edgefix.md` and `steps/summary.md` (not in the repo). Change a number there, change it in the paper.
+
 ## Phases
 
 0. **Recovery & reproducibility.**
