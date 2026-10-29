@@ -281,6 +281,7 @@ General rules for every experiment:
 
 - Source of record is Hendrik's Overleaf project; `publication/manuscript_ieee_access/paper.tex` is gitignored on purpose (only `preprint_arxiv.tex` is tracked). Edit paper.tex locally, keep a copy and a diff under `../context/manuscript/resub/`, and paste into Overleaf.
 - **Pass 1 done 2026-10-29** (corrective, no pending decision): matched protocol, equal-budget Tables 1–2 and the step sweep, k-space definition, corrected references. `RESUB-TODO` comments mark pass-2 slots: byline, the 3D/Swin2SR convergence rows, the ablation section, regenerated figures (all old results figures are commented out), and the framing sentences.
+- **Decisions 2026-10-29 (Eshaan):** the both-neighbours model is the paper's "2.5D" model, the previous-slice-only variant is the ablation "2.5D-prev"; the paper reports converged checkpoints only (no equal-budget table): 2.5D = continuation epoch 31, 2.5D-prev = epoch 30, EDSR = epoch 16, Res-SRDiff = last; 3D and Swin2SR rows are provisional (marked p) until their continuations are evaluated; the first submission's errors are stated briefly in the response letter only; framing and pathology sentences are in; Res-SRDiff LPIPS footnote only; no downstream check; no seed repeats. Converged-checkpoint summaries: `results/final_eval_20261024-2204/*/summary_conv.md`.
 - Numbers in the paper come from `results/final_eval_20261024-2204/{blockavg,kspace,kspace_noise2}/summary_edgefix.md` and `steps/summary.md` (not in the repo). Change a number there, change it in the paper.
 
 ## Phases
