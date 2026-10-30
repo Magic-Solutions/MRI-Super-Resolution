@@ -2,59 +2,49 @@
 
 Comparative analysis of **3D convolutional** and **2.5D slice-conditioned** U-Net architectures for brain MRI super-resolution using the Elucidated Diffusion Model (EDM) framework.
 
-**Pretrained Weights:** [HuggingFace](https://huggingface.co/Chichonnade/Comparative-Analysis-3D-2.5D-MRI-Super-Resolution-EDM)
+**Pretrained Weights:** [HuggingFace](https://huggingface.co/Chichonnade/Comparative-Analysis-3D-2.5D-MRI-Super-Resolution-EDM) (first preprint version; the checkpoints behind the results below are not uploaded yet)
 **Dataset:** [FOMO60K / NKI cohort](https://huggingface.co/datasets/FOMO-MRI/FOMO60K)
 
 ## Results
 
-| Method | PSNR (dB) | SSIM | LPIPS | Params |
-|---|---|---|---|---|
-| Bicubic interpolation | 33.89 | 0.957 | 0.091 | -- |
-| EDSR (DIV2K pretrained) | 35.57 | 0.977 | 0.024 | 1.4M |
-| Swin2SR (DIV2K pretrained) | 35.50 | 0.978 | 0.024 | 1.0M |
-| 2.5D EDM (ours, 10 ep) | 35.82 | 0.971 | 0.040 | 51.1M |
-| **3D EDM (ours, 20 ep)** | **37.75** | **0.997** | **0.020** | 50.7M |
+Results of the revised manuscript (IEEE Access resubmission). The task is 2x in-plane super-resolution of sagittal T1 slices (128x128 to 256x256).
 
-Evaluated on 5 held-out NKI subjects (6 volumes, 993 sagittal slices) with 2x SR. All methods evaluated on identical test data and degradation pipeline.
+Every model is trained from scratch to convergence on 500 subjects of the NKI cohort of FOMO60K. Checkpoints are selected on 6 validation subjects. Evaluation uses 70 held-out subjects and one deterministic 20-step Euler sampler for both EDM models. Numbers are means over subjects.
 
-The 3D EDM model is the best-performing configuration in this comparison, with the strongest PSNR, SSIM, and LPIPS overall. In the per-volume analysis reported in the paper, it also consistently outperforms the 2.5D model and interpolation baselines.
+| Method | Block-avg. PSNR | Block-avg. LPIPS | k-space PSNR | k-space + noise PSNR | IXI fg PSNR | Params |
+|---|---|---|---|---|---|---|
+| Bicubic | 33.66 | 0.087 | 33.93 | 32.63 | 31.16 | -- |
+| EDSR | 37.50 | 0.026 | **35.01** | 33.26 | 33.04 | 1.4M |
+| Swin2SR\* | 37.11 | 0.030 | 34.92 | 32.92 | 33.36 | 1.0M |
+| Res-SRDiff | 36.48 | 0.008† | 34.20 | 33.00 | 31.54 | 56.7M |
+| 2.5D EDM, previous slice | 37.43 | 0.023 | 34.80 | 33.30 | 32.54 | 51.1M |
+| 2.5D EDM, both neighbours | 37.70 | **0.022** | 34.98 | **33.54** | 32.77 | 51.1M |
+| 3D EDM | **37.72** | 0.023 | 34.87 | 33.24 | **33.65** | 50.7M |
 
-![PSNR and SSIM comparison](assets/results_bars.png)
+- **Test sets.** *Block-avg.* is the degradation used in training (2x2 block averaging). *k-space* keeps the central half of k-space, which produces Gibbs ringing. *k-space + noise* adds Rician noise on top. No model saw either k-space degradation in training. *IXI* is a zero-shot test on 70 skull-stripped subjects of the IXI cohort (three London hospitals, three scanners). Its score is PSNR over brain pixels only, because the empty background inflates plain PSNR.
+- **Footnotes.** † Res-SRDiff trains on the same LPIPS network that is used as the metric, so its LPIPS is not comparable. \* Swin2SR's continued training is still running, so its row is provisional.
 
-### All Methods Visual Comparison
+Neither architecture dominates. On the training degradation the 3D model and the both-neighbours 2.5D model are tied, and both are 0.2 dB ahead of EDSR. The 2.5D model copes better with a change of degradation: it ties EDSR on k-space and leads every metric with noise. The 3D model copes better with a change of cohort and leads on IXI.
 
-The 3D EDM model recovers the sharpest cortical detail in the zoomed region while preserving clearer anatomical structure than the pretrained natural-image baselines.
+Five sampling steps give the same accuracy as twenty. At five steps a 176-slice volume takes 28 s with the 2.5D model and 88 s with the 3D model on one A100. These results supersede those of the first preprint version.
 
-![All methods comparison](assets/visual_all_methods.png)
+![Per-subject PSNR](assets/resub_per_subject_psnr.png)
 
-### Visual Comparison
+*Per-subject PSNR on the 70 block-averaged NKI test volumes, with a bootstrap 95% band for the both-neighbours 2.5D model.*
 
-**3D model** (GT HR | Model SR | Trilinear):
+![Validation curves](assets/resub_training_curves.png)
 
-![3D model sample](assets/sample_3d_axial.png)
-
-**2.5D model** (GT HR | Generated HR | Bicubic LR):
-
-![2.5D model sample](assets/sample_25d.png)
-
-### Per-Pixel Error Heatmap
-
-The EDM models reduce reconstruction error at cortical folds and tissue boundaries, with the 3D model achieving the lowest overall error in the manuscript analysis.
-
-![Error heatmap](assets/error_heatmap.png)
-
-### Per-Slice PSNR
-
-This plot is shown for the 2.5D model because it operates slice-by-slice; the 3D model is evaluated volumetrically and achieves stronger aggregate metrics.
-
-![Per-slice PSNR](assets/per_slice_psnr.png)
+*Validation PSNR of every run during training, including the continuation that trains each model until validation stops improving. Circles mark the reported checkpoints.*
 
 ## Architecture
 
 Both models use the EDM framework (Karras et al. 2022) adapted from DIAMOND:
 
-- **3D EDM**: Full 3D convolutional U-Net with channels [32, 64, 128, 256], 3D self-attention at the deepest level, patch-based training (32^3) and sliding-window inference with overlap blending. 20-step Euler sampling.
-- **2.5D EDM**: 2D U-Net with channels [64, 64, 128, 256], conditions on 1 adjacent slice for inter-slice context. Single-step Heun sampling (0.09s/slice).
+- **3D EDM**: a 3D convolutional U-Net with channels [32, 64, 128, 256] and self-attention at the deepest level. It trains on 64^3 low-resolution patches and runs inference with a sliding window (one-quarter overlap, linear blending).
+- **2.5D EDM**: a 2D U-Net with channels [64, 64, 128, 256]. It conditions on the previous and the next low-resolution slice; a previous-slice-only variant is kept as an ablation.
+- **Sampler**: both models use the same deterministic Euler sampler, 20 steps from sigma 5 to 0.002.
+
+![Method overview](assets/resub_method_overview.png)
 
 ## Quick Start
 
@@ -108,9 +98,15 @@ PYTORCH_ENABLE_MPS_FALLBACK=1 python scripts/run_inference_3d.py \
 
 ### Evaluate
 
+Every reported number comes from `scripts/evaluate_sr.py`, which writes per-slice metrics for one method. `scripts/compare_sr.py` then turns those into per-subject statistics and paired tests. `<split>` is a folder with `low_res/test` and `full_res/test`.
+
 ```bash
-python scripts/evaluate_25d.py \
-  --checkpoint path/to/agent_epoch_00010.pt --num-steps 1
+python scripts/evaluate_sr.py --method 25d --checkpoint agent_best_val.pt --sampler shared --num-steps 20 \
+  --override agent.upsampler.inner_model.num_next_slices_conditioning=1 --data-dir <split> --lpips --out 25d.csv
+python scripts/evaluate_sr.py --method 3d --checkpoint model_best_val.pt --num-steps 20 --patch-size 64 \
+  --data-dir <split> --lpips --out 3d.csv
+python scripts/evaluate_sr.py --method bicubic --data-dir <split> --lpips --out bicubic.csv
+python scripts/compare_sr.py *.csv --reference bicubic --out summary
 ```
 
 ## Project Structure
