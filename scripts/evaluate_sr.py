@@ -14,7 +14,7 @@ Every method is scored the same way, so the CSVs can be compared with
   no bicubic, and the first submission's "bicubic" baseline was bilinear for
   that reason.
 
-Methods: bilinear, bicubic, 25d, 3d, edsr, swin2sr.
+Methods: bilinear, bicubic, 25d, 3d, edsr, swin2sr, ressrdiff (needs --code-dir, a Res-SRDiff clone).
 
 Usage:
     python scripts/evaluate_sr.py --method bicubic --data-dir <split> --out bicubic.csv
@@ -49,7 +49,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from data.dataset import Dataset, MRIHdf5Dataset  # noqa: E402
 from metrics import lpips_distance, psnr, ssim  # noqa: E402
 
-METHODS = ["bilinear", "bicubic", "25d", "3d", "edsr", "swin2sr"]
+METHODS = ["bilinear", "bicubic", "25d", "3d", "edsr", "swin2sr", "ressrdiff"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -63,6 +63,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--num-steps", type=int, default=20, help="Sampling steps for the diffusion models")
     p.add_argument("--lpips", action="store_true", help="Also compute LPIPS (downloads AlexNet weights on first use)")
     p.add_argument("--max-volumes", type=int, default=0, help="Evaluate only the first N volumes (0 = all)")
+    p.add_argument("--volumes", nargs="+", default=None, metavar="NAME",
+                   help="Evaluate only these volumes (HDF5 file names without .hdf5, e.g. sub_2794_ses_1_t1_sagittal)")
+    p.add_argument("--save-predictions", type=Path, default=None, metavar="DIR",
+                   help="Also write each volume's clamped prediction as uint8 HDF5 (<DIR>/<name>.hdf5, "
+                        "datasets frame_<i>_x indexed like the HR files) for the qualitative figures")
+    p.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto",
+                   help="auto picks cuda, then mps, then cpu")
     # 2.5D
     p.add_argument("--sampler", choices=["shared", "legacy"], default="shared",
                    help="shared: deterministic EDM sampler (Euler unless --order 2); legacy: the `sampler` config")
@@ -77,10 +84,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--cond-channels", type=int, default=1024)
     # EDSR / Swin2SR
     p.add_argument("--pretrained", action="store_true", help="Use the DIV2K weights instead of --checkpoint")
+    # Res-SRDiff
+    p.add_argument("--code-dir", type=Path, default=None, help="Clone of github.com/mosaf/Res-SRDiff (src/ressrdiff_adapter.py)")
     return p.parse_args()
 
 
-def pick_device() -> torch.device:
+def pick_device(choice: str = "auto") -> torch.device:
+    if choice != "auto":
+        return torch.device(choice)
     if torch.cuda.is_available():
         return torch.device("cuda")
     if torch.backends.mps.is_available():
@@ -88,8 +99,12 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_volumes(data_dir: Path, max_volumes: int):
-    """Yield (name, lr, hr) per test volume; lr (T, 1, h, w) and hr (T, 1, H, W) in [-1, 1] on CPU."""
+def load_volumes(data_dir: Path, max_volumes: int, volumes: list[str] | None = None):
+    """Yield (name, lr, hr) per test volume; lr (T, 1, h, w) and hr (T, 1, H, W) in [-1, 1] on CPU.
+
+    ``volumes``, when given, keeps only the volumes with those names (the HDF5 file name without
+    ``.hdf5``); ``max_volumes`` still bounds how many episodes are looked at.
+    """
     lr_dir, hr_dir = data_dir / "low_res" / "test", data_dir / "full_res" / "test"
     lr_ds = Dataset(lr_dir, MRIHdf5Dataset(hr_dir), name="test")
     lr_ds.load_from_default_path()
@@ -98,6 +113,8 @@ def load_volumes(data_dir: Path, max_volumes: int):
         ep = lr_ds.load_episode(ep_id)
         lr = ep.obs.float().div(255).mul(2).sub(1) if ep.obs.dtype == torch.uint8 else ep.obs.float()
         hdf5_name = ep.info["original_file_id"].split("/")[-1]
+        if volumes is not None and hdf5_name.replace(".hdf5", "") not in volumes:
+            continue
         with h5py.File(hr_dir / hdf5_name, "r") as f:
             keys = sorted([k for k in f.keys() if k.endswith("_x")], key=lambda k: int(k.split("_")[1]))
             hr = np.stack([np.asarray(f[k]) for k in keys])
@@ -208,6 +225,21 @@ class Model2dBaseline:
         return torch.cat(out)
 
 
+class ModelResSRDiff:
+    def __init__(self, args: argparse.Namespace, device: torch.device) -> None:
+        import ressrdiff_adapter
+
+        self.adapter = ressrdiff_adapter
+        self.rmodel = ressrdiff_adapter.build_model(args.code_dir, ressrdiff_adapter.make_flags(), device)
+        self.rmodel.ema_model.load_state_dict(torch.load(args.checkpoint, map_location="cpu", weights_only=False), strict=True)
+        self.model = self.rmodel.ema_model
+
+    @torch.no_grad()
+    def predict_volume(self, lr: torch.Tensor) -> torch.Tensor:
+        return torch.cat([self.adapter.sample(self.rmodel, self.adapter.lq_from_lr(lr[si : si + 1])).cpu()
+                          for si in range(lr.size(0))])
+
+
 def psnr_foreground(pred: torch.Tensor, target: torch.Tensor) -> float:
     mask = target > -1  # HR pixels that were non-zero before normalization to [-1, 1]
     mse = (pred - target)[mask].pow(2).mean().item()
@@ -224,10 +256,12 @@ def git_sha() -> str:
 
 def main() -> None:
     args = parse_args()
-    if args.method in ("25d", "3d") or (args.method in ("edsr", "swin2sr") and not args.pretrained):
+    if args.method in ("25d", "3d", "ressrdiff") or (args.method in ("edsr", "swin2sr") and not args.pretrained):
         assert args.checkpoint is not None, f"--checkpoint is required for --method {args.method}"
+    if args.method == "ressrdiff":
+        assert args.code_dir is not None, "--code-dir is required for --method ressrdiff"
     torch.manual_seed(args.seed)
-    device = pick_device()
+    device = pick_device(args.device)
     name = args.name or args.method
     print(f"Method {name} on {device}; data {args.data_dir}")
 
@@ -237,6 +271,8 @@ def main() -> None:
         method = Model25d(args, device)
     elif args.method == "3d":
         method = Model3d(args, device)
+    elif args.method == "ressrdiff":
+        method = ModelResSRDiff(args, device)
     else:
         method = Model2dBaseline(args, device)
 
@@ -250,13 +286,19 @@ def main() -> None:
     with args.out.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
-        for subject, lr, hr in load_volumes(args.data_dir, args.max_volumes):
+        for subject, lr, hr in load_volumes(args.data_dir, args.max_volumes, args.volumes):
             torch.manual_seed(args.seed)
             t_volume = time.time()
             pred = method.predict_volume(lr).clamp(-1, 1)
             if device.type == "cuda":
                 torch.cuda.synchronize()
             inference_seconds.append(time.time() - t_volume)
+            if args.save_predictions is not None:
+                args.save_predictions.mkdir(parents=True, exist_ok=True)
+                as_uint8 = pred[:, 0].add(1).div(2).mul(255).round().clamp(0, 255).to(torch.uint8).numpy()
+                with h5py.File(args.save_predictions / f"{subject}.hdf5", "w") as f_pred:
+                    for si in range(as_uint8.shape[0]):
+                        f_pred.create_dataset(f"frame_{si}_x", data=as_uint8[si])
             psnrs = []
             for si in range(hr.size(0)):
                 p, h = pred[si : si + 1], hr[si : si + 1]

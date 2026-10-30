@@ -44,7 +44,8 @@ def make_segment(episode: Episode, segment_id: SegmentId, should_pad: bool = Tru
         pad(episode.end[start:stop]),
         pad(episode.trunc[start:stop]),
         mask_padding,
-        info=episode.info,
+        # Copied because callers add each segment's own full_res to it.
+        info=dict(episode.info),
         id=SegmentId(segment_id.episode_id, start, stop),
     )
 

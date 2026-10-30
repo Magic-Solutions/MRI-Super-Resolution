@@ -6,6 +6,7 @@ set -euo pipefail
 # - PREPROCESSED_DATA_URI: gs://... prefix containing already-processed dataset (low_res/full_res)
 # Optional:
 # - RUN_NAME, TRAIN_3D_ARGS (extra CLI args for train_3d.py)
+# - INIT_CHECKPOINT_URI (gs:// weights to start from)
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT_DIR}"
@@ -129,6 +130,25 @@ if [[ -f "${PROCESSED_DIR}/low_res/test/episode_mapping.json" ]]; then
   echo "Using validation split from ${PROCESSED_DIR}/low_res/test"
 fi
 
+# Optional start weights, to continue a finished run (with --start-epoch in the extra args).
+INIT_ARGS=()
+if [[ -n "${INIT_CHECKPOINT_URI:-}" ]]; then
+  INIT_CKPT_LOCAL="${WORK_ROOT}/init_checkpoint.pt"
+  echo "Downloading init checkpoint ${INIT_CHECKPOINT_URI} -> ${INIT_CKPT_LOCAL}"
+  python - "${INIT_CHECKPOINT_URI}" "${INIT_CKPT_LOCAL}" <<'PY'
+import sys, os
+from google.cloud import storage
+
+src, dst = sys.argv[1], sys.argv[2]
+bucket = src[len("gs://"):].split("/", 1)[0]
+blob = src[len("gs://") + len(bucket) + 1:]
+client = storage.Client(project=os.environ.get("GCP_PROJECT") or None)
+client.bucket(bucket).blob(blob).download_to_filename(dst)
+print(f"Downloaded checkpoint to {dst}")
+PY
+  INIT_ARGS=(--init-checkpoint "${INIT_CKPT_LOCAL}")
+fi
+
 python src/train_3d.py \
   --lr-train "${PROCESSED_DIR}/low_res/train" \
   --hr-train "${PROCESSED_DIR}/full_res/train" \
@@ -136,6 +156,7 @@ python src/train_3d.py \
   --save-dir "${SAVE_DIR}" \
   --wandb-project mri-super-resolution-3d \
   --wandb-name "${RUN_NAME}" \
+  "${INIT_ARGS[@]}" \
   ${TRAIN_3D_ARGS} &
 TRAIN_PID=$!
 

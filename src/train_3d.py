@@ -53,7 +53,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--upsampling-factor", type=int, default=2)
     parser.add_argument("--patches-per-volume", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=200)
+    parser.add_argument("--epochs", type=int, default=200, help="Number of the last epoch")
+    parser.add_argument("--start-epoch", type=int, default=1, help="Number of the first epoch; a continued run counts on from the original")
+    parser.add_argument("--init-checkpoint", type=Path, default=None, help="Start from these weights (optimizer state starts fresh)")
+    parser.add_argument("--patience", type=int, default=0, help="Stop after this many PSNR validations without a new best (0: off)")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--grad-acc-steps", type=int, default=4)
     parser.add_argument("--channels", type=int, nargs="+", default=[32, 64, 128, 256])
@@ -68,6 +71,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--debug-step-logs", action="store_true", help="Print detailed logs every N train steps.")
     parser.add_argument("--debug-log-every", type=int, default=1, help="Log every N train steps when debug enabled.")
     return parser.parse_args()
+
+
+def append_csv_row(path: Path, row: dict) -> None:
+    write_header = not path.is_file()
+    with path.open("a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(row))
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
 
 
 @torch.no_grad()
@@ -147,6 +159,9 @@ def main() -> None:
         "upsampling_factor": args.upsampling_factor,
     }
     model = build_model(model_cfg).to(device)
+    if args.init_checkpoint is not None:
+        model.load_state_dict(torch.load(args.init_checkpoint, map_location=device, weights_only=False), strict=True)
+        print(f"Initialised from {args.init_checkpoint}")
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {n_params:,}")
 
@@ -180,10 +195,24 @@ def main() -> None:
         print(f"Val: {len(val_patches)} patches from {val_patches.num_volumes} volumes")
     eval_psnr_every = args.eval_psnr_every or args.save_every
     best_val_psnr = float("-inf")
+    since_best = 0
+    path_csv = args.save_dir / "val_metrics.csv"
 
     args.save_dir.mkdir(parents=True, exist_ok=True)
 
-    for epoch in range(1, args.epochs + 1):
+    if args.init_checkpoint is not None and val_patches is not None:
+        # Score the starting weights, so a continued run keeps them unless training beats them.
+        eval_metrics = evaluate_3d(
+            model, args.lr_test, args.hr_test, args.upsampling_factor, device,
+            args.patch_size, num_steps=args.eval_num_steps, max_volumes=args.eval_max_volumes,
+        )
+        best_val_psnr = eval_metrics["eval/psnr"]
+        torch.save(model.state_dict(), args.save_dir / "model_best_val.pt")
+        print(f"Starting weights: val PSNR={best_val_psnr:.2f}  SSIM={eval_metrics['eval/ssim']:.4f}")
+        append_csv_row(path_csv, {"epoch": args.start_epoch - 1, "train_loss": "", "val_loss": "",
+                                  "val_psnr": best_val_psnr, "val_ssim": eval_metrics["eval/ssim"], "is_best": 1})
+
+    for epoch in range(args.start_epoch, args.epochs + 1):
         model.train()
         optimizer.zero_grad()
         epoch_loss = 0.0
@@ -237,6 +266,9 @@ def main() -> None:
                 log_dict["is_best"] = 1
                 torch.save(model.state_dict(), args.save_dir / "model_best_val.pt")
                 print(f"  New best val PSNR; saved {args.save_dir / 'model_best_val.pt'}")
+                since_best = 0
+            else:
+                since_best += 1
 
         if args.wandb_project and wandb is not None:
             wandb.log(log_dict)
@@ -250,18 +282,16 @@ def main() -> None:
                 "val_ssim": log_dict.get("eval/ssim", ""),
                 "is_best": log_dict.get("is_best", 0),
             }
-            path_csv = args.save_dir / "val_metrics.csv"
-            write_header = not path_csv.is_file()
-            with path_csv.open("a", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(row))
-                if write_header:
-                    writer.writeheader()
-                writer.writerow(row)
+            append_csv_row(path_csv, row)
 
         if epoch % args.save_every == 0:
             ckpt_path = args.save_dir / f"model_epoch_{epoch}.pt"
             torch.save(model.state_dict(), ckpt_path)
             print(f"  Saved {ckpt_path}")
+
+        if args.patience and since_best >= args.patience:
+            print(f"No new best val PSNR in {since_best} validations; stopping after epoch {epoch}")
+            break
 
     final_path = args.save_dir / "model_final.pt"
     torch.save(model.state_dict(), final_path)
