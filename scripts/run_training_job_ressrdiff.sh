@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Vertex job: train the Res-SRDiff comparator (src/train_ressrdiff.py).
-# Res-SRDiff is cloned at a pinned commit here rather than vendored (see src/ressrdiff_adapter.py).
+# Res-SRDiff is fetched at the commit pinned in src/ressrdiff_adapter.py rather than vendored.
 #
 # Env: OUTPUT_URI, PREPROCESSED_DATA_URI (the training/ split), TRAIN_RESSRDIFF_ARGS (extra trainer args).
 set -euo pipefail

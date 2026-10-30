@@ -1,4 +1,4 @@
-"""Train Res-SRDiff (the MRI-specific diffusion comparator, E6) from scratch on our slice pairs.
+"""Train Res-SRDiff (the MRI-specific diffusion comparator) from scratch on our slice pairs.
 
 The network, diffusion, loss (MSE + LPIPS), EMA and optimizer are Res-SRDiff's
 own (see src/ressrdiff_adapter.py); the data, validation and checkpoint

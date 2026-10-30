@@ -5,8 +5,7 @@ masking) on the validation volumes, but with every target noised at one fixed si
 a sigma drawn from the training distribution. For each sigma on a log grid it records the
 EDM-weighted denoising loss, the image-space MSE of the denoised output and its PSNR, next to
 the training density of that sigma (ln sigma ~ N(P_mean, P_std^2)) and the sampler's step
-sigmas. The plot answers whether the training sigma distribution covers the noise levels the
-sampler visits, and where the denoiser is weakest.
+sigmas. Plot with scripts/make_per_sigma_figure.py.
 
 Usage:
     python scripts/per_sigma_error.py --val <dir with low_res/test and full_res/test> \
@@ -78,7 +77,6 @@ def main() -> None:
     agent.eval()
     denoiser = agent.upsampler
 
-    # The training distribution and the sampler schedule, for the plot.
     p_mean, p_std = sigma_cfg.loc, sigma_cfg.scale
     step_sigmas = build_sigmas(args.sampler_steps, EDMSamplerConfig.sigma_min, EDMSamplerConfig.sigma_max, EDMSamplerConfig.rho, torch.device("cpu")).tolist()
 
@@ -88,8 +86,7 @@ def main() -> None:
         writer = csv.DictWriter(f, fieldnames=["sigma", "loss_denoising", "mse_denoised", "psnr_denoised", "train_density", "num_batches"])
         writer.writeheader()
         for sigma in sigmas:
-            # Every target in the batch gets this sigma; the noise itself is seeded per sigma so
-            # the curve is a function of sigma only.
+            # One sigma for every target and the same noise seed for each sigma, so the curve depends on sigma only.
             denoiser.sample_sigma_training = lambda n, dev, s=sigma: torch.full((n,), s, device=dev)
             losses, psnrs, mses = [], [], []
             with torch.no_grad(), fixed_rng(args.seed):

@@ -1,11 +1,9 @@
-"""Glue for Res-SRDiff (Safari et al., https://github.com/mosaf/Res-SRDiff), the MRI-specific diffusion comparator (E6).
+"""Glue for Res-SRDiff (Safari et al., https://github.com/mosaf/Res-SRDiff), the MRI-specific diffusion comparator.
 
-The Res-SRDiff code is not copied into this repo: the job scripts clone it at a
-pinned commit and pass its folder as ``code_dir``. This module builds its model
-and diffusion with the settings below, and feeds it our slices the way all our
-models see them: intensities x / 255 * 2 - 1, and the LR slice upsampled to HR
-size with bicubic interpolation on CPU (Res-SRDiff runs with sf = 1, so it
-expects the LR image already at HR size).
+The Res-SRDiff code is not vendored: callers fetch ``RESSRDIFF_COMMIT`` and pass
+its folder as ``code_dir``. Inputs are scaled like all our models' (x / 255 * 2 - 1),
+and the LR slice is bicubically upsampled to HR size on CPU, because Res-SRDiff
+runs with sf = 1 and expects the LR image at HR size.
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ def build_model(code_dir: Path, flags: argparse.Namespace, device: torch.device)
     script_dir = str(Path(code_dir) / "script")
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
-    from build import Model  # noqa: E402  (from the Res-SRDiff clone)
+    from build import Model
 
     return Model(name="Super_resolution", device=device, data_loader=None, test_data_loader=None, FLAGS=flags)
 

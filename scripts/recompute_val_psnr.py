@@ -1,12 +1,8 @@
 """Re-validate saved 2.5D epoch checkpoints with the trainer's sampled validation and the current code.
 
-The both-neighbours run logged its validation PSNR with the edge-padding bug (the missing next
-neighbour of the last slice was a zero frame), which cost about 1.3 dB on the 16 evenly spaced
-validation slices because the last slice is always one of them. Its learning curve therefore does
-not join its continuation, which validated with the fix. This replays Trainer.validate_upsampler_sr
-(same slice selection, shared 20-step Euler sampler, fixed seed, bicubic conditioning) for every
-agent_epoch_*.pt in a folder and writes one row per epoch, so the curve can be drawn from fixed
-numbers. Nothing here selects a checkpoint: the reported checkpoints stay as chosen.
+Replays Trainer.validate_upsampler_sr (same slice selection, shared 20-step Euler sampler, fixed
+seed) for every agent_epoch_*.pt in a folder and writes one row per epoch. Runs validated before
+the slice-conditioning edge-padding fix logged a lower val PSNR.
 
 Usage:
     python scripts/recompute_val_psnr.py --val <dir with low_res/test and full_res/test> \
@@ -52,7 +48,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"))
-    up_mode = "bilinear" if device.type == "mps" else "bicubic"  # the trainer's own rule; CUDA validates with bicubic
+    up_mode = "bilinear" if device.type == "mps" else "bicubic"  # same rule as the trainer
 
     with initialize_config_dir(config_dir=str(ROOT / "config"), version_base="1.3"):
         cfg = compose(config_name=args.config_name, overrides=args.override)

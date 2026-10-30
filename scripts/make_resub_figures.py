@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Qualitative figures for the resubmission, from stored predictions and the per-slice CSVs.
 
-Inputs (see context/eval_resub/figures_job.sh for how the predictions are produced):
-- ``--pred-dir``: the figures job's output, with ``data/<volume>.hdf5`` (datasets ``hr``, ``lr``,
-  uint8) and ``pred/<method>/<volume>.hdf5`` (datasets ``frame_<i>_x``, uint8, like the HR files).
+Inputs:
+- ``--pred-dir``: ``data/<volume>.hdf5`` (datasets ``hr``, ``lr``, uint8) and
+  ``pred/<method>/<volume>.hdf5`` as written by ``evaluate_sr.py --save-predictions``.
 - ``--csv-dir``: the final evaluation's block-averaging folder (per-slice CSVs of every method) and
-  ``--csv-25d``: the per-slice CSV of the paper's 2.5D model (both-neighbours continuation checkpoint).
+  ``--csv-25d``: the per-slice CSV of the 2.5D (both-neighbours) model.
 
 Outputs (PDF in ``--out-dir``, PNG previews in ``--png-dir``):
 - fig_visual_all_methods: one mid-sagittal slice, all methods, full slice over a zoomed cortical crop.
@@ -44,7 +44,7 @@ METHODS = [("bicubic", "Bicubic"), ("edsr", "EDSR"), ("swin2sr", "Swin2SR"), ("r
 # Per-slice CSV of each method in the final evaluation folder (the 2.5D one is passed separately).
 CSV_NAMES = {"bicubic": "bicubic.csv", "edsr": "edsr.csv", "swin2sr": "swin2sr.csv", "ressrdiff": "ressrdiff.csv",
              "25d_prev": "25d.csv", "3d": "3d.csv"}
-# Colour-blind-safe categorical palette (one fixed slot per method; black for the reference bicubic).
+# Colour-blind-safe palette, one fixed colour per method.
 COLORS = {"bicubic": "#555555", "edsr": "#2a78d6", "swin2sr": "#eb6834", "ressrdiff": "#1baf7a",
           "25d_prev": "#eda100", "25d": "#e34948", "3d": "#6250d6"}
 MARKERS = {"bicubic": "s", "edsr": "o", "swin2sr": "^", "ressrdiff": "v", "25d_prev": "D", "25d": "o", "3d": "x"}
@@ -133,8 +133,7 @@ def fig_visual_all_methods(args: argparse.Namespace) -> dict:
 def fig_pixel_error_heatmap(args: argparse.Namespace) -> dict:
     gt, _, preds = load_slice(args.pred_dir, args.visual_volume, args.visual_slice)
     errors = {k: np.abs(preds[k].astype(np.float64) - gt.astype(np.float64)) for k, _ in METHODS}
-    # One shared scale: the 99.5th percentile of the bicubic error, so the learned models' maps are
-    # comparable with each other and with the reference.
+    # One shared scale for every method: the 99.5th percentile of the bicubic error.
     vmax = float(np.percentile(errors["bicubic"], 99.5))
     panels = [("gt", "Ground truth")] + METHODS
     fig, axes = plt.subplots(2, 4, figsize=(3.5, 1.95), gridspec_kw={"wspace": 0.03, "hspace": 0.12})

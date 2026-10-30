@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Two more resubmission figures: the learning curves (fig:curves) and the method overview (Fig. 1).
+"""Learning-curve (fig:curves) and method-overview (Fig. 1) figures for the resubmission.
 
-Learning curves: validation PSNR per epoch for the six main runs, with the continuation segments
-appended (dashed) and the reported checkpoint marked. Inputs are the val_metrics.csv files pulled
-into results/training_curves/ and results/cont_*/ (see HANDOFF.md), plus the Swin2SR continuation
-exported from W&B. Res-SRDiff validates every 5,500 steps; its x axis is converted to "passes over
-the training data" so every run shares one axis.
+Learning curves: validation PSNR of the six main runs from the val_metrics.csv files in
+results/training_curves/ and results/cont_*/ (the Swin2SR continuation exported from W&B), with
+continuations dashed and the reported checkpoint marked. The x axis is passes over the training
+data, so runs that count epochs and steps differently share one axis.
 
-Method overview: a schematic of the two pipelines drawn here so the labels match the paper
-(both-neighbour conditioning, 64^3 patches, one shared 20-step Euler sampler), replacing the first
-submission's drawing.
+Method overview: a schematic of the 2.5D and 3D pipelines.
 
 Usage:
     python scripts/make_curves_and_overview.py [--out-dir publication/manuscript_ieee_access/figs]
@@ -24,7 +21,7 @@ import pandas as pd
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.patches import FancyArrowPatch, FancyBboxPatch  # noqa: E402
+from matplotlib.patches import FancyBboxPatch  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 RES = ROOT.parent / "results"
@@ -49,8 +46,7 @@ def load_runs() -> dict[str, tuple[pd.DataFrame, pd.DataFrame | None, int | None
     tc = RES / "training_curves"
     runs = {}
     runs["25d_prev"] = (pd.read_csv(tc / "25d.csv"), pd.read_csv(RES / "cont_25d" / "val_metrics.csv"), 30)
-    # The both-neighbours run logged its validation under the edge-padding bug; the re-validated
-    # curve (recompute_val_psnr.py, job mri-resub-recompute-val-psnr-20261024-2204) replaces it.
+    # Re-validated with the edge-padding fix by scripts/recompute_val_psnr.py.
     both = pd.read_csv(tc / "25d_both_val_psnr_fixed.csv")
     both_cont = pd.read_csv(RES / "cont_25d_both" / "val_metrics.csv")
     runs["25d"] = (both, both_cont, 27)
@@ -102,7 +98,6 @@ def box(ax, x, y, w, h, text, fc):
 
 
 def arrow(ax, x0, x1, y):
-    # annotate() draws a visible head at this scale; FancyArrowPatch in axes units came out as a bare line.
     ax.annotate("", xy=(x1, y), xytext=(x0, y), arrowprops={"arrowstyle": "-|>", "lw": 0.9, "color": "black", "shrinkA": 0, "shrinkB": 0})
 
 

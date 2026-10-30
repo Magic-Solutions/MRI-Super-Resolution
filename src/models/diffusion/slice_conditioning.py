@@ -3,12 +3,10 @@
 The layout matches ``Denoiser.forward``: the ``num_prev`` LR slices before the
 target, the ``num_next`` LR slices after it, then the target's own LR slice.
 Previous neighbours before the first slice are zero frames, like the zero
-padding at the start of training segments. Training segments are never padded
-at the end (the batch sampler keeps ``can_sample_beyond_end`` off), so a model
-with ``num_next > 0`` has never seen a zero frame after the target; next
-neighbours past the last slice repeat the last slice instead. With zero frames
-there, the both-neighbour model put a uniform grey offset on the last slice of
-every test volume (about 27 dB on slices the other models reconstruct at 50 dB).
+padding at the start of training segments. Next neighbours past the last slice
+repeat the last slice: training segments are never padded at the end (the batch
+sampler keeps ``can_sample_beyond_end`` off), so a model with ``num_next > 0``
+has never seen a zero frame after the target.
 """
 
 import torch

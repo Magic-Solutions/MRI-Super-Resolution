@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-sigma denoising error figure (ablation B1) from the CSVs written by scripts/per_sigma_error.py.
+"""Per-sigma denoising error figure from the CSVs written by scripts/per_sigma_error.py.
 
 Left: the EDM-weighted denoising loss of each 2.5D model as a function of the noise level, with
 the training distribution of ln(sigma) (shaded) and the 20 sampler sigmas (ticks) on the same axis.
@@ -44,7 +44,6 @@ def main() -> None:
         ax.grid(alpha=0.3)
         for s in sampler:
             ax.axvline(s, color="gray", lw=0.5, alpha=0.5)
-    # Training density of ln(sigma) as a shaded band on a secondary axis of the left panel.
     ax1b = ax1.twinx()
     ax1b.fill_between(dens.sigma, 0, dens.train_density, color="#d4e6f6", alpha=0.8, zorder=0)
     ax1b.set_ylim(0, dens.train_density.max() * 3)

@@ -294,8 +294,6 @@ def main() -> None:
                 torch.cuda.synchronize()
             inference_seconds.append(time.time() - t_volume)
             if args.save_predictions is not None:
-                # Store the prediction the metrics below are computed from, as 0-255 uint8 like the
-                # HR files (same frame_<i>_x keys, so slice i of the HR file is slice i here).
                 args.save_predictions.mkdir(parents=True, exist_ok=True)
                 as_uint8 = pred[:, 0].add(1).div(2).mul(255).round().clamp(0, 255).to(torch.uint8).numpy()
                 with h5py.File(args.save_predictions / f"{subject}.hdf5", "w") as f_pred:

@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Recompute the 2.5D validation denoising loss for saved epoch checkpoints.
 
-The runs logged val_loss_denoising through DatasetTraverser while make_segment handed every
-segment the episode's own info dict, so each chunk's full_res overwrote the previous one's and
-every chunk of a volume was scored against the last chunk's HR slices. This replays
-Trainer.test_upsampler (eval mode, fixed seed, the same chunking and batch size) with the fix,
-one row per checkpoint, so the convergence curve can show a validation loss that is comparable
-with the training loss. The sampled val PSNR in val_metrics.csv was never affected.
+Replays Trainer.test_upsampler (eval mode, fixed seed, same chunking and batch size) for every
+agent_epoch_*.pt in a folder and writes one row per checkpoint. Runs trained before the
+make_segment info-dict fix logged a val_loss_denoising scored against the wrong HR slices.
 
 Usage:
     python scripts/recompute_val_loss.py --val <dir with low_res/test and full_res/test> \
@@ -50,9 +47,8 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     if device.type == "mps":
-        # Denoiser.forward upsamples the conditioning bilinearly on MPS; training used bicubic on CUDA.
-        # Keep bicubic here (it falls back to the CPU with PYTORCH_ENABLE_MPS_FALLBACK=1), or the
-        # numbers are about 3 dB worse than the run's and not comparable with its training loss.
+        # Denoiser.forward upsamples the conditioning bilinearly on MPS, but training used bicubic on
+        # CUDA. Force bicubic (needs PYTORCH_ENABLE_MPS_FALLBACK=1) so the loss matches training.
         _interpolate = F.interpolate
         F.interpolate = lambda *a, **k: _interpolate(*a, **{**k, "mode": "bicubic"}) if k.get("mode") == "bilinear" else _interpolate(*a, **k)
     with initialize_config_dir(config_dir=str(ROOT / "config"), version_base="1.3"):

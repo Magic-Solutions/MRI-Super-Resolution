@@ -175,7 +175,7 @@ class Trainer(StateDictMixin):
         self.agent.setup_training(instantiate(cfg.upsampler.sigma_distribution))
 
         # Training state (things to be saved/restored)
-        self.epoch = getattr(cfg.training, "first_epoch", 1) - 1  # > 0 when continuing a finished run
+        self.epoch = getattr(cfg.training, "first_epoch", 1) - 1
         self.num_batch_train = 0
         self.num_batch_test = 0
         self.best_val_psnr = float("-inf")
