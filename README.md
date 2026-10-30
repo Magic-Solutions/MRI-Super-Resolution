@@ -141,6 +141,7 @@ results/paper_v1/    Per-slice baseline metrics from the original submission
 ## Authors
 
 - **Hendrik Chiche**
+- **Eshaan Gulati**
 - **Ludovic Corcos**
 - **Logan Rouge**
 
