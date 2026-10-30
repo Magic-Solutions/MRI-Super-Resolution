@@ -43,3 +43,6 @@ ACCESS_latex_template_20240429*/
 # Run artifacts
 runs/
 inference_output/
+
+# Private working notes for coding agents
+CLAUDE.local.md
