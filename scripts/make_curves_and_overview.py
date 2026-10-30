@@ -52,13 +52,13 @@ def load_runs() -> dict[str, tuple[pd.DataFrame, pd.DataFrame | None, int | None
     runs["25d"] = (both, both_cont, 27)
     runs["3d"] = (pd.read_csv(tc / "3d.csv"), pd.read_csv(RES / "cont_3d" / "val_metrics.csv"), 47)
     runs["edsr"] = (pd.read_csv(tc / "edsr.csv"), None, 16)
-    sw_cont = tc / "swin2sr_cont_wandb.csv"
-    runs["swin2sr"] = (pd.read_csv(tc / "swin2sr.csv"), pd.read_csv(sw_cont) if sw_cont.exists() else None, None)
+    # Swin2SR stopped at its 20-epoch cap, still improving slightly; epoch 20 is its best and reported checkpoint.
+    runs["swin2sr"] = (pd.read_csv(tc / "swin2sr.csv"), pd.read_csv(RES / "cont_swin2sr" / "val_metrics.csv"), 20)
     runs["ressrdiff"] = (pd.read_csv(tc / "ressrdiff.csv"), None, None)
     return runs
 
 
-LABELS = {"25d": "2.5D", "25d_prev": "2.5D-prev", "3d": "3D", "edsr": "EDSR", "swin2sr": "Swin2SR$^{p}$", "ressrdiff": "Res-SRDiff"}
+LABELS = {"25d": "2.5D", "25d_prev": "2.5D-prev", "3d": "3D", "edsr": "EDSR", "swin2sr": "Swin2SR", "ressrdiff": "Res-SRDiff"}
 COLORS = {"25d": "#d62728", "25d_prev": "#ff9f1c", "3d": "#5b5bd6", "edsr": "#1f77b4", "swin2sr": "#e8743b", "ressrdiff": "#2ca58d"}
 
 
