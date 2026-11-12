@@ -92,8 +92,11 @@ def fig_curves(out_dir: Path, png_dir: Path) -> None:
     print("wrote", out_dir / "fig_training_curves.pdf")
 
 
+PAD = 0.008  # FancyBboxPatch draws the box this far outside (x, y, w, h)
+
+
 def box(ax, x, y, w, h, text, fc):
-    ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.02,rounding_size=0.03", fc=fc, ec="black", lw=0.8))
+    ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle=f"round,pad={PAD},rounding_size=0.03", fc=fc, ec="black", lw=0.8))
     ax.text(x + w / 2, y + h / 2, text, ha="center", va="center", fontsize=7.5)
 
 
@@ -107,30 +110,31 @@ def fig_overview(out_dir: Path, png_dir: Path) -> None:
         ("(a) 2.5D slice-conditioned pipeline", [
             ("LR volume\n$128\\times128\\times D$", "#e6e6e6"),
             ("Target slice +\nboth neighbours\n(bicubic $\\uparrow 2$)", "#fff3c4"),
-            ("2D EDM U-Net\n64/64/128/256\nattention at level 4", "#d9f0d3"),
+            ("2D EDM U-Net\n64/64/128/256", "#d9f0d3"),
             ("Shared sampler\n20 Euler steps", "#d4e6f6"),
             ("HR slice\n$256\\times256$", "#f8d7da"),
         ]),
         ("(b) 3D volumetric pipeline", [
             ("LR volume\n$128\\times128\\times D$", "#e6e6e6"),
             ("$64^3$ LR patch\n(trilinear $\\uparrow 2$)", "#fff3c4"),
-            ("3D EDM U-Net\n32/64/128/256\nattention at level 4", "#d9f0d3"),
+            ("3D EDM U-Net\n32/64/128/256", "#d9f0d3"),
             ("Shared sampler\n20 Euler steps", "#d4e6f6"),
             ("HR patch, blended\n$64\\times128\\times128$", "#f8d7da"),
         ]),
     ]
     for ax, (title, boxes) in zip(axes, rows):
-        ax.set_xlim(0, 1)
+        ax.set_xlim(-2 * PAD, 1 + 2 * PAD)
         ax.set_ylim(0, 1)
         ax.axis("off")
         ax.text(0.0, 0.93, title, fontsize=8.5, fontweight="bold", va="center")
         n = len(boxes)
-        w, gap = 0.16, (1 - 0.16 * n) / (n - 1)
+        w = 0.165
+        gap = (1 - w * n) / (n - 1)
         for i, (text, fc) in enumerate(boxes):
             x = i * (w + gap)
             box(ax, x, 0.08, w, 0.68, text, fc)
             if i < n - 1:
-                arrow(ax, x + w + 0.005, x + w + gap - 0.005, 0.42)
+                arrow(ax, x + w + PAD + 0.002, x + w + gap - PAD - 0.002, 0.42)
     fig.tight_layout(h_pad=0.4)
     fig.savefig(out_dir / "fig_method_overview.pdf")
     fig.savefig(png_dir / "fig_method_overview.png", dpi=150)
